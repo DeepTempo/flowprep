@@ -1,0 +1,281 @@
+{
+  "log_type": "netflow",
+  "schema_version": "v1",
+  "description": "NetFlow/IPFIX canonical schema for network flow logs",
+  "canonical_fields": {
+    "required": {
+      "timestamp": {
+        "type": "timestamp",
+        "description": "Flow start timestamp normalized to Spark timestamp",
+        "aliases": [
+          "timestamp",
+          "time",
+          "ts",
+          "flow_start",
+          "start_time",
+          "datetime",
+          "first_seen",
+          "firstseen",
+          "_time",
+          "flow_start_milliseconds"
+        ]
+      },
+      "src_ip": {
+        "type": "string",
+        "description": "Source IP address",
+        "aliases": [
+          "src_ip",
+          "s_ip",
+          "source_ip",
+          "client_ip",
+          "ipv4_address_cli",
+          "srcaddr",
+          "src_addr",
+          "ipv4_src_addr"
+        ]
+      },
+      "dest_ip": {
+        "type": "string",
+        "description": "Destination IP address",
+        "aliases": [
+          "dest_ip",
+          "dst_ip",
+          "destination_ip",
+          "d_ip",
+          "c_ip",
+          "server_ip",
+          "ipv4_address_serv",
+          "dstaddr",
+          "dst_addr",
+          "ipv4_dst_addr"
+        ]
+      },
+      "src_port": {
+        "type": "int",
+        "description": "Source TCP/UDP port",
+        "aliases": [
+          "src_port",
+          "s_port",
+          "source_port",
+          "client_port",
+          "srcport",
+          "sport",
+          "l4_src_port"
+        ]
+      },
+      "dest_port": {
+        "type": "int",
+        "description": "Destination TCP/UDP port",
+        "aliases": [
+          "dest_port",
+          "dst_port",
+          "destination_port",
+          "d_port",
+          "c_port",
+          "server_port",
+          "dstport",
+          "dport",
+          "l4_dst_port"
+        ]
+      },
+      "fwd_bytes": {
+        "type": "double",
+        "description": "Bytes from focal/source to engaged/destination",
+        "aliases": [
+          "fwd_bytes",
+          "forward_bytes",
+          "bytes_forward",
+          "dst_tbo",
+          "in_bytes",
+          "bytes_in",
+          "bytes",
+          "c_bytes_all",
+          "bytes_sent",
+          "octets_fwd",
+          "total_fwd_bytes",
+          "octets"
+        ]
+      },
+      "bwd_bytes": {
+        "type": "double",
+        "description": "Bytes from engaged/destination to focal/source. Optional in practice — the Scala ingestion job zero-fills when no source field/alias is present, so sources with only a single total-bytes column ingest cleanly.",
+        "aliases": [
+          "bwd_bytes",
+          "backward_bytes",
+          "bytes_backward",
+          "dst_tbi",
+          "out_bytes",
+          "bytes_out",
+          "s_bytes_all",
+          "bytes_received",
+          "octets_bwd",
+          "total_bwd_bytes"
+        ]
+      },
+      "fwd_pkts": {
+        "type": "long",
+        "description": "Packets from focal/source to engaged/destination. Preserved in canonical raw lake output but not used for sequence construction.",
+        "aliases": [
+          "fwd_pkts",
+          "fwd_packets",
+          "forward_pkts",
+          "forward_packets",
+          "pkts_forward",
+          "packets_forward",
+          "in_pkts",
+          "pkts_in",
+          "packets_in",
+          "packets_sent",
+          "total_fwd_pkts",
+          "total_fwd_packets",
+          "packets"
+        ]
+      },
+      "bwd_pkts": {
+        "type": "long",
+        "description": "Packets from engaged/destination to focal/source. Preserved in canonical raw lake output but not used for sequence construction.",
+        "aliases": [
+          "bwd_pkts",
+          "bwd_packets",
+          "backward_pkts",
+          "backward_packets",
+          "pkts_backward",
+          "packets_backward",
+          "out_pkts",
+          "pkts_out",
+          "packets_out",
+          "packets_received",
+          "total_bwd_pkts",
+          "total_bwd_packets"
+        ]
+      },
+      "flow_dur": {
+        "type": "double",
+        "description": "Flow duration normalized to seconds in pipeline internals",
+        "aliases": [
+          "flow_dur",
+          "duration",
+          "durat",
+          "flow_duration",
+          "duration_ms",
+          "duration_sec",
+          "elapsed_time",
+          "flow_duration_milliseconds",
+          "durationms",
+          "duration_us",
+          "duration_microseconds",
+          "flow_duration_microseconds",
+          "duration_ns",
+          "duration_nanoseconds",
+          "flow_duration_nanoseconds"
+        ],
+        "unit_detection": {
+          "seconds": [
+            "flow_dur",
+            "duration",
+            "durat",
+            "flow_duration",
+            "duration_sec",
+            "elapsed_time"
+          ],
+          "milliseconds": [
+            "duration_ms",
+            "flow_duration_milliseconds",
+            "durationms"
+          ],
+          "microseconds": [
+            "duration_us",
+            "duration_microseconds",
+            "flow_duration_microseconds"
+          ],
+          "nanoseconds": [
+            "duration_ns",
+            "duration_nanoseconds",
+            "flow_duration_nanoseconds"
+          ]
+        }
+      }
+    },
+    "optional": {
+      "protocol": {
+        "type": "string_or_int",
+        "aliases": [
+          "protocol",
+          "proto",
+          "ip_protocol",
+          "l4_protocol",
+          "ipprotocol"
+        ],
+        "env_gate": "INCLUDE_PROTOCOL"
+      },
+      "state": {
+        "type": "string",
+        "aliases": [
+          "state",
+          "conn_state",
+          "connection_state",
+          "tcp_state",
+          "flow_state"
+        ],
+        "env_gate": "INCLUDE_STATE"
+      }
+    },
+    "label_fields": [
+      "attack",
+      "attack_type",
+      "src_tags",
+      "dst_tags"
+    ],
+    "metadata_fields": [
+      "input_file",
+      "processing_time"
+    ]
+  },
+  "display_columns": [
+    "src_ip",
+    "src_port",
+    "dest_ip",
+    "dest_port",
+    "fwd_bytes",
+    "bwd_bytes",
+    "fwd_pkts",
+    "bwd_pkts",
+    "flow_dur"
+  ],
+  "display_columns_extended": [
+    "src_ip",
+    "src_port",
+    "dest_ip",
+    "dest_port",
+    "fwd_bytes",
+    "bwd_bytes",
+    "fwd_pkts",
+    "bwd_pkts",
+    "flow_dur",
+    "protocol",
+    "attack",
+    "attack_type"
+  ],
+  "raw_lake_columns": [
+    "timestamp",
+    "src_ip",
+    "dest_ip",
+    "src_port",
+    "dest_port",
+    "fwd_bytes",
+    "bwd_bytes",
+    "fwd_pkts",
+    "bwd_pkts",
+    "flow_dur",
+    "focal_ip",
+    "engaged_ip",
+    "input_file",
+    "tenant"
+  ],
+  "raw_lake_optional_columns": [
+    "protocol",
+    "state",
+    "attack",
+    "attack_type"
+  ]
+}

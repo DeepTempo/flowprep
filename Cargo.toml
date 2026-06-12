@@ -1,0 +1,21 @@
+[package]
+name = "flowprep"
+version = "0.1.0"
+edition = "2024"
+description = "Convert network telemetry (pcap, flow CSVs, vendor exports) into ML-ready canonical NetFlow parquet"
+license = "Apache-2.0"
+repository = "https://github.com/DeepTempo/flowprep"
+readme = "README.md"
+keywords = ["netflow", "pcap", "parquet", "arrow", "security"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+arrow = { version = "59.0.0", features = ["prettyprint"] }
+clap = { version = "4.6.1", features = ["derive"] }
+etherparse = "0.20.1"
+parquet = { version = "59.0.0", features = ["arrow", "zstd"] }
+pcap-parser = "0.17.0"
+serde_json = "1.0.150"
+
+[profile.release]
+lto = true
