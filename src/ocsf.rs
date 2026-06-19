@@ -101,7 +101,10 @@ pub fn ocsf_to_parquet(input: &str, output: &str) -> Result<usize> {
         // A close event we set out to convert that lacks required data is data
         // loss, not a routine skip — fail loudly with the offending record.
         let flow = event.to_canonical().map_err(|reason| {
-            format!("OCSF close event {} is missing required data: {reason}", i + 1)
+            format!(
+                "OCSF close event {} is missing required data: {reason}",
+                i + 1
+            )
         })?;
         flows.push(flow);
     }

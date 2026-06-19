@@ -244,5 +244,3 @@ fn ingest_packet(
         state.bwd_pkts += 1;
     }
 }
-
-
