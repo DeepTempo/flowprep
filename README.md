@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+  <a href="https://crates.io/crates/flowprep"><img src="https://img.shields.io/crates/v/flowprep.svg" alt="crates.io"></a>
   <img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust stable">
 </p>
 
@@ -55,7 +56,10 @@ flowprep is that missing step.
 ## Quick start
 
 ```bash
-# build (Rust stable, no system dependencies — no libpcap, no JVM)
+# install from crates.io (Rust stable, no system dependencies — no libpcap, no JVM)
+cargo install flowprep
+
+# or build from source
 cargo build --release
 
 # or just run the demo against the bundled examples
@@ -221,6 +225,12 @@ python3 -m venv .venv && .venv/bin/pip install dpkt pyarrow
 # throughput benchmark
 .venv/bin/python tests/bench_pcap.py
 ```
+
+## Release
+
+Releases are tag-driven. Pushing a `v*` tag builds Linux, macOS, and Windows
+binaries, attaches them to a GitHub release, and publishes the crate to
+crates.io using `CARGO_REGISTRY_TOKEN`.
 
 ## Acknowledgments
 

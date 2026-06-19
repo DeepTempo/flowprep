@@ -7,10 +7,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
-pub fn write_parquet(
-    batch: &RecordBatch,
-    path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn write_parquet(batch: &RecordBatch, path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(path)?;
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))

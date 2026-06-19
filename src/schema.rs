@@ -97,7 +97,12 @@ pub fn load_schema_spec() -> SchemaSpec {
 
     let mut passthrough: Vec<String> = fields["label_fields"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
     passthrough.push("label".to_string());
 

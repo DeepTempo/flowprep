@@ -14,9 +14,9 @@ use std::sync::Arc;
 use arrow::array::{Float64Array, Int32Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
-use pcap_parser::{create_reader, Block, PcapBlockOwned, PcapError};
+use pcap_parser::{Block, PcapBlockOwned, PcapError, create_reader};
 
-use crate::schema::{canonical_schema, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP};
+use crate::schema::{PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP, canonical_schema};
 use crate::writer::write_parquet;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -87,8 +87,7 @@ pub fn pcap_to_parquet(input: &str, output: &str) -> Result<usize> {
                         // Default if_tsresol (1e-6); per-interface overrides
                         // are out of spike scope.
                         let ts = ((epb.ts_high as i64) << 32) | epb.ts_low as i64;
-                        if let Some(p) = parse_packet(epb.data, linktype, ts, epb.origlen as i64)
-                        {
+                        if let Some(p) = parse_packet(epb.data, linktype, ts, epb.origlen as i64) {
                             ingest_packet(p, &mut active, &mut flows);
                         }
                     }
@@ -149,12 +148,8 @@ fn parse_packet(data: &[u8], linktype: u16, timestamp: i64, origlen: i64) -> Opt
     };
 
     let (src_port, dest_port, protocol) = match &sliced.transport {
-        Some(TransportSlice::Tcp(tcp)) => {
-            (tcp.source_port(), tcp.destination_port(), PROTOCOL_TCP)
-        }
-        Some(TransportSlice::Udp(udp)) => {
-            (udp.source_port(), udp.destination_port(), PROTOCOL_UDP)
-        }
+        Some(TransportSlice::Tcp(tcp)) => (tcp.source_port(), tcp.destination_port(), PROTOCOL_TCP),
+        Some(TransportSlice::Udp(udp)) => (udp.source_port(), udp.destination_port(), PROTOCOL_UDP),
         // ICMP has no ports; type/code stand in so flows still key cleanly.
         Some(TransportSlice::Icmpv4(icmp)) => {
             (icmp.type_u8() as u16, icmp.code_u8() as u16, PROTOCOL_ICMP)

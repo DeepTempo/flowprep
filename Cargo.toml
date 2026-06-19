@@ -2,12 +2,15 @@
 name = "flowprep"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Convert network telemetry (pcap, flow CSVs, vendor exports) into ML-ready canonical NetFlow parquet"
 license = "Apache-2.0"
 repository = "https://github.com/DeepTempo/flowprep"
+homepage = "https://deeptempo.ai"
 readme = "README.md"
 keywords = ["netflow", "pcap", "parquet", "arrow", "security"]
 categories = ["command-line-utilities", "network-programming"]
+exclude = [".github/"]
 
 [dependencies]
 arrow = { version = "59.0.0", features = ["prettyprint"] }

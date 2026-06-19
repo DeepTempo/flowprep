@@ -31,10 +31,9 @@ enum Command {
 
 fn peek(input: &str, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::open(input)?;
-    let mut reader =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?
-            .with_batch_size(rows)
-            .build()?;
+    let mut reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?
+        .with_batch_size(rows)
+        .build()?;
     if let Some(batch) = reader.next() {
         arrow::util::pretty::print_batches(&[batch?])?;
     }
@@ -44,8 +43,9 @@ fn peek(input: &str, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Pcap { input, output } => pcap::pcap_to_parquet(input, output)
-            .map(|n| println!("Wrote {n} flows to {output}")),
+        Command::Pcap { input, output } => {
+            pcap::pcap_to_parquet(input, output).map(|n| println!("Wrote {n} flows to {output}"))
+        }
         Command::Canonicalize { input, output } => canonicalize::canonicalize_file(input, output)
             .map(|n| println!("Wrote {n} flows to {output}")),
         Command::Peek { input, rows } => peek(input, *rows),

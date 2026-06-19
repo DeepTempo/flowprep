@@ -8,15 +8,13 @@
 use std::fs::File;
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, Float64Array, Int32Array, Int64Array, StringArray,
-};
+use arrow::array::{Array, ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow::compute::{cast, concat_batches};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 use crate::schema::{
-    canonical_schema, load_schema_spec, normalize_name, protocol_number, REQUIRED_FIELDS,
+    REQUIRED_FIELDS, canonical_schema, load_schema_spec, normalize_name, protocol_number,
 };
 use crate::writer::write_parquet;
 
@@ -41,9 +39,8 @@ fn read_table(path: &str) -> Result<RecordBatch> {
         reader.collect::<std::result::Result<_, _>>()?
     } else {
         let file = File::open(path)?;
-        let reader =
-            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?
-                .build()?;
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?
+            .build()?;
         reader.collect::<std::result::Result<_, _>>()?
     };
     if batches.is_empty() {
@@ -80,14 +77,14 @@ pub fn canonicalize(batch: &RecordBatch) -> Result<RecordBatch> {
             .clone()
     };
     let n = batch.num_rows();
-    let mut columns: Vec<ArrayRef> = Vec::new();
-
-    columns.push(timestamp_to_micros(&col("timestamp"))?);
-    columns.push(cast(&col("src_ip"), &DataType::Utf8)?);
-    columns.push(cast(&col("dest_ip"), &DataType::Utf8)?);
-    columns.push(cast(&col("src_port"), &DataType::Int32)?);
-    columns.push(cast(&col("dest_port"), &DataType::Int32)?);
-    columns.push(to_rounded_i64(&col("fwd_bytes"))?);
+    let mut columns: Vec<ArrayRef> = vec![
+        timestamp_to_micros(&col("timestamp"))?,
+        cast(&col("src_ip"), &DataType::Utf8)?,
+        cast(&col("dest_ip"), &DataType::Utf8)?,
+        cast(&col("src_port"), &DataType::Int32)?,
+        cast(&col("dest_port"), &DataType::Int32)?,
+        to_rounded_i64(&col("fwd_bytes"))?,
+    ];
 
     if resolved.contains_key("bwd_bytes") {
         columns.push(to_rounded_i64(&col("bwd_bytes"))?);
@@ -104,7 +101,11 @@ pub fn canonicalize(batch: &RecordBatch) -> Result<RecordBatch> {
     }
 
     let dur_source = normalize_name(&resolved["flow_dur"]);
-    let divisor = spec.duration_divisors.get(&dur_source).copied().unwrap_or(1.0);
+    let divisor = spec
+        .duration_divisors
+        .get(&dur_source)
+        .copied()
+        .unwrap_or(1.0);
     let dur = cast(&col("flow_dur"), &DataType::Float64)?;
     let dur = dur.as_any().downcast_ref::<Float64Array>().unwrap();
     columns.push(Arc::new(Float64Array::from_iter(
@@ -128,12 +129,18 @@ pub fn canonicalize(batch: &RecordBatch) -> Result<RecordBatch> {
         if let Some(source) = source_names.iter().find(|s| &normalize_name(s) == label) {
             if !fields.iter().any(|f| f.name() == label) {
                 fields.push(Field::new(label, DataType::Utf8, true));
-                columns.push(cast(batch.column_by_name(source).unwrap(), &DataType::Utf8)?);
+                columns.push(cast(
+                    batch.column_by_name(source).unwrap(),
+                    &DataType::Utf8,
+                )?);
             }
         }
     }
 
-    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?)
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?)
 }
 
 /// Coerce a timestamp column to epoch microseconds (int64).
