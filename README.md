@@ -66,7 +66,7 @@ cargo build --release
 ./demo.sh
 ```
 
-Three subcommands:
+Four subcommands:
 
 ```bash
 # 1. Raw packet captures -> bidirectional flow records
@@ -75,7 +75,10 @@ flowprep pcap capture.pcap flows.parquet
 # 2. Any aliased flow table (CSV or parquet) -> the canonical schema
 flowprep canonicalize cic_export.csv flows.parquet
 
-# 3. Inspect any parquet file from the terminal, no Python required
+# 3. OCSF Network Activity events (JSON/NDJSON) -> the canonical schema
+flowprep ocsf network_activity.ndjson flows.parquet
+
+# 4. Inspect any parquet file from the terminal, no Python required
 flowprep peek flows.parquet -n 20
 ```
 
@@ -112,6 +115,22 @@ new vendor's column names is a JSON edit, not a code change.
   everything lands as **int64 epoch microseconds**.
 - **Protocols** arrive as IANA numbers or names (`tcp`, `udp`, `icmp`);
   names are mapped to numbers.
+
+### OCSF Network Activity events
+
+OCSF (the Open Cybersecurity Schema Framework) is a standard, not a vendor
+dialect, so flowprep reads its Network Activity events (`class_uid` 4001)
+directly rather than through the alias map. Endpoints come from
+`src_endpoint`/`dst_endpoint`, byte and packet counts from `traffic` (with a
+top-level `bytes_from_client`/`bytes_from_server` fallback), and `time`/
+`duration` are converted from the OCSF millisecond convention to the canonical
+epoch-microsecond timestamp and float-second duration. Only flow-close events
+(`activity_name` "Closed" or `activity_id` 2) are kept, since those carry the
+final byte totals. Input may be NDJSON (one event per line), a JSON array, or a
+single object. Events are deserialized into a typed view of the standard's
+shape rather than navigated as loose JSON, and malformed records or close
+events missing required fields are reported as errors rather than silently
+dropped — partial or empty output never looks like success.
 
 ### Bidirectional flow aggregation (pcap)
 
@@ -205,7 +224,6 @@ fix benefits our pipeline and yours equally.
 ## Roadmap
 
 - nfcapd (nfdump binary) reader
-- OCSF Network Activity event reader
 - Zeek `conn.log` reader
 - IPv6 flow-tuple test coverage and pcapng per-interface timestamp resolutions
 - Published canonical-parquet versions of common research datasets

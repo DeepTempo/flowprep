@@ -9,14 +9,11 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int32Array, Int64Array, StringArray};
-use arrow::record_batch::RecordBatch;
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 use pcap_parser::{Block, PcapBlockOwned, PcapError, create_reader};
 
-use crate::schema::{PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP, canonical_schema};
+use crate::schema::{CanonicalFlow, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP, flows_to_batch};
 use crate::writer::write_parquet;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -115,9 +112,27 @@ pub fn pcap_to_parquet(input: &str, output: &str) -> Result<usize> {
     // HashMap drain order is nondeterministic; sort for stable output.
     flows.sort_by_key(|f| (f.state.first_timestamp, f.key.clone()));
 
-    let batch = flows_to_batch(&flows)?;
+    let canonical: Vec<CanonicalFlow> = flows.iter().map(flow_to_canonical).collect();
+    let batch = flows_to_batch(&canonical)?;
     write_parquet(&batch, output)?;
     Ok(batch.num_rows())
+}
+
+fn flow_to_canonical(flow: &FlowRecord) -> CanonicalFlow {
+    let s = &flow.state;
+    CanonicalFlow {
+        timestamp: s.first_timestamp,
+        src_ip: flow.key.0.clone(),
+        dest_ip: flow.key.1.clone(),
+        src_port: flow.key.2 as i32,
+        dest_port: flow.key.3 as i32,
+        fwd_bytes: s.fwd_bytes,
+        bwd_bytes: s.bwd_bytes,
+        fwd_pkts: Some(s.fwd_pkts),
+        bwd_pkts: Some(s.bwd_pkts),
+        flow_dur: (s.last_timestamp - s.first_timestamp) as f64 / 1e6,
+        protocol: Some(flow.key.4 as i32),
+    }
 }
 
 fn parse_packet(data: &[u8], linktype: u16, timestamp: i64, origlen: i64) -> Option<Packet> {
@@ -230,41 +245,4 @@ fn ingest_packet(
     }
 }
 
-fn flows_to_batch(flows: &[FlowRecord]) -> Result<RecordBatch> {
-    let columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(Int64Array::from_iter_values(
-            flows.iter().map(|f| f.state.first_timestamp),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            flows.iter().map(|f| f.key.0.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            flows.iter().map(|f| f.key.1.as_str()),
-        )),
-        Arc::new(Int32Array::from_iter_values(
-            flows.iter().map(|f| f.key.2 as i32),
-        )),
-        Arc::new(Int32Array::from_iter_values(
-            flows.iter().map(|f| f.key.3 as i32),
-        )),
-        Arc::new(Int64Array::from_iter_values(
-            flows.iter().map(|f| f.state.fwd_bytes),
-        )),
-        Arc::new(Int64Array::from_iter_values(
-            flows.iter().map(|f| f.state.bwd_bytes),
-        )),
-        Arc::new(Int64Array::from_iter_values(
-            flows.iter().map(|f| f.state.fwd_pkts),
-        )),
-        Arc::new(Int64Array::from_iter_values(
-            flows.iter().map(|f| f.state.bwd_pkts),
-        )),
-        Arc::new(Float64Array::from_iter_values(flows.iter().map(|f| {
-            (f.state.last_timestamp - f.state.first_timestamp) as f64 / 1e6
-        }))),
-        Arc::new(Int32Array::from_iter_values(
-            flows.iter().map(|f| f.key.4 as i32),
-        )),
-    ];
-    Ok(RecordBatch::try_new(canonical_schema(), columns)?)
-}
+

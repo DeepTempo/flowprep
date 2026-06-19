@@ -7,7 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::error::ArrowError;
+use arrow::record_batch::RecordBatch;
 use serde_json::Value;
 
 const SCHEMA_JSON: &str = include_str!(concat!(
@@ -43,6 +46,66 @@ pub fn canonical_schema() -> Arc<Schema> {
         Field::new("flow_dur", DataType::Float64, false), // seconds
         Field::new("protocol", DataType::Int32, true),
     ]))
+}
+
+/// One canonical flow record, already in canonical units (timestamp epoch
+/// microseconds, flow_dur seconds). Every reader produces these; the batch
+/// assembly below is the single place that knows the column order and Arrow
+/// types, so a new reader never re-derives the canonical layout.
+pub struct CanonicalFlow {
+    pub timestamp: i64,
+    pub src_ip: String,
+    pub dest_ip: String,
+    pub src_port: i32,
+    pub dest_port: i32,
+    pub fwd_bytes: i64,
+    pub bwd_bytes: i64,
+    pub fwd_pkts: Option<i64>,
+    pub bwd_pkts: Option<i64>,
+    pub flow_dur: f64,
+    pub protocol: Option<i32>,
+}
+
+/// Assemble canonical flow records into a `canonical_schema()` RecordBatch.
+/// Shared by every reader (pcap, ocsf, …) so column order and types live in
+/// exactly one place.
+pub fn flows_to_batch(flows: &[CanonicalFlow]) -> std::result::Result<RecordBatch, ArrowError> {
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from_iter_values(
+            flows.iter().map(|f| f.timestamp),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            flows.iter().map(|f| f.src_ip.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            flows.iter().map(|f| f.dest_ip.as_str()),
+        )),
+        Arc::new(Int32Array::from_iter_values(
+            flows.iter().map(|f| f.src_port),
+        )),
+        Arc::new(Int32Array::from_iter_values(
+            flows.iter().map(|f| f.dest_port),
+        )),
+        Arc::new(Int64Array::from_iter_values(
+            flows.iter().map(|f| f.fwd_bytes),
+        )),
+        Arc::new(Int64Array::from_iter_values(
+            flows.iter().map(|f| f.bwd_bytes),
+        )),
+        Arc::new(Int64Array::from(
+            flows.iter().map(|f| f.fwd_pkts).collect::<Vec<_>>(),
+        )),
+        Arc::new(Int64Array::from(
+            flows.iter().map(|f| f.bwd_pkts).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            flows.iter().map(|f| f.flow_dur),
+        )),
+        Arc::new(Int32Array::from(
+            flows.iter().map(|f| f.protocol).collect::<Vec<_>>(),
+        )),
+    ];
+    RecordBatch::try_new(canonical_schema(), columns)
 }
 
 /// Parsed view of the canonical schema JSON.

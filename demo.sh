@@ -18,4 +18,9 @@ time $BIN canonicalize examples/cic2017_sample.parquet /tmp/flowprep_demo_cic.pa
 $BIN peek /tmp/flowprep_demo_cic.parquet -n 5
 
 echo
-echo "Demo outputs: /tmp/flowprep_demo_pcap.parquet /tmp/flowprep_demo_cic.parquet"
+echo "=== 3. OCSF Network Activity (NDJSON, nested fields, ms units) -> canonical ==="
+time $BIN ocsf examples/ocsf_sample.ndjson /tmp/flowprep_demo_ocsf.parquet
+$BIN peek /tmp/flowprep_demo_ocsf.parquet -n 5
+
+echo
+echo "Demo outputs: /tmp/flowprep_demo_pcap.parquet /tmp/flowprep_demo_cic.parquet /tmp/flowprep_demo_ocsf.parquet"

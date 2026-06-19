@@ -1,0 +1,3 @@
+{"class_uid":4001,"activity_name":"Closed","time":1750000000000,"duration":2500,"src_endpoint":{"ip":"192.168.10.5","port":44321},"dst_endpoint":{"ip":"93.184.216.34","port":443},"traffic":{"bytes_in":1200,"bytes_out":34000,"packets_in":8,"packets_out":12},"connection_info":{"protocol_name":"tcp"}}
+{"class_uid":4001,"activity_name":"Opened","time":1750000003000,"src_endpoint":{"ip":"192.168.10.9","port":51000},"dst_endpoint":{"ip":"10.0.0.3","port":80}}
+{"class_uid":4001,"activity_id":2,"time":1750000010000,"elapsed_time":150,"src_endpoint":{"ip":"192.168.10.17","port":5353},"dst_endpoint":{"ip":"8.8.8.8","port":53},"bytes_from_client":90,"bytes_from_server":0,"connection_info":{"protocol_num":17}}

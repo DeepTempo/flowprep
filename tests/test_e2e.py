@@ -71,9 +71,33 @@ def build_cicids_csv(path):
         f.write("\n".join(rows))
 
 
+def build_ocsf_ndjson(path):
+    """OCSF Network Activity NDJSON: nested fields, ms units, a non-close event."""
+    rows = [
+        '{"activity_name":"Closed","time":1750000000000,"duration":2500,'
+        '"src_endpoint":{"ip":"192.168.10.5","port":44321},'
+        '"dst_endpoint":{"ip":"93.184.216.34","port":443},'
+        '"traffic":{"bytes_in":1200,"bytes_out":34000,"packets_in":8,"packets_out":12},'
+        '"connection_info":{"protocol_name":"tcp"}}',
+        # Non-close event: must be dropped.
+        '{"activity_name":"Opened","time":1750000003000,'
+        '"src_endpoint":{"ip":"192.168.10.9","port":51000},'
+        '"dst_endpoint":{"ip":"10.0.0.3","port":80}}',
+        # activity_id 2 (close) with top-level bytes fallback and numeric protocol.
+        '{"activity_id":2,"time":1750000010000,"elapsed_time":150,'
+        '"src_endpoint":{"ip":"192.168.10.17","port":5353},'
+        '"dst_endpoint":{"ip":"8.8.8.8","port":53},'
+        '"bytes_from_client":90,"bytes_from_server":0,'
+        '"connection_info":{"protocol_num":17}}',
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(rows))
+
+
 def main():
     build_test_pcap("/tmp/flowprep_test.pcap")
     build_cicids_csv("/tmp/flowprep_test.csv")
+    build_ocsf_ndjson("/tmp/flowprep_test.ndjson")
 
     r = subprocess.run(
         [FLOWPREP_BIN, "pcap", "/tmp/flowprep_test.pcap", "/tmp/flowprep_pcap.parquet"],
@@ -104,6 +128,26 @@ def main():
     assert rows[0]["timestamp"] == 1750000000_000000, "epoch-seconds detection wrong"
     assert rows[1]["timestamp"] == 1750000060_000000, "epoch-seconds detection wrong"
     assert rows[0]["label"] == "BENIGN", "label passthrough wrong"
+
+    r = subprocess.run(
+        [FLOWPREP_BIN, "ocsf", "/tmp/flowprep_test.ndjson", "/tmp/flowprep_ocsf.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, "ocsf conversion failed"
+
+    t = pq.read_table("/tmp/flowprep_ocsf.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert t.num_rows == 2, f"expected 2 close events, got {t.num_rows}"
+    assert rows[0]["timestamp"] == 1750000000_000000, "ms->us timestamp wrong"
+    assert rows[0]["flow_dur"] == 2.5, f"duration ms->s wrong: {rows[0]['flow_dur']}"
+    assert rows[0]["fwd_bytes"] == 1200 and rows[0]["bwd_bytes"] == 34000, "nested bytes wrong"
+    assert rows[0]["fwd_pkts"] == 8 and rows[0]["bwd_pkts"] == 12, "nested packets wrong"
+    assert rows[0]["protocol"] == 6, "protocol_name mapping wrong"
+    assert rows[1]["flow_dur"] == 0.15, f"elapsed_time ms->s wrong: {rows[1]['flow_dur']}"
+    assert rows[1]["fwd_bytes"] == 90, "top-level bytes fallback wrong"
+    assert rows[1]["protocol"] == 17, "protocol_num passthrough wrong"
 
     print("ALL TESTS PASSED")
 

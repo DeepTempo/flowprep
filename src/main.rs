@@ -1,4 +1,5 @@
 mod canonicalize;
+mod ocsf;
 mod pcap;
 mod schema;
 mod writer;
@@ -21,6 +22,8 @@ enum Command {
     Pcap { input: String, output: String },
     /// aliased parquet/CSV flow table -> canonical parquet
     Canonicalize { input: String, output: String },
+    /// OCSF Network Activity JSON/NDJSON -> canonical parquet
+    Ocsf { input: String, output: String },
     /// print the first rows of a parquet file
     Peek {
         input: String,
@@ -48,6 +51,9 @@ fn main() {
         }
         Command::Canonicalize { input, output } => canonicalize::canonicalize_file(input, output)
             .map(|n| println!("Wrote {n} flows to {output}")),
+        Command::Ocsf { input, output } => {
+            ocsf::ocsf_to_parquet(input, output).map(|n| println!("Wrote {n} flows to {output}"))
+        }
         Command::Peek { input, rows } => peek(input, *rows),
     };
     if let Err(e) = result {

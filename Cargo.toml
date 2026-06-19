@@ -18,6 +18,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 etherparse = "0.20.1"
 parquet = { version = "59.0.0", features = ["arrow", "zstd"] }
 pcap-parser = "0.17.0"
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 
 [profile.release]
