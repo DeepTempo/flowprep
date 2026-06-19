@@ -14,12 +14,20 @@ exclude = [".github/"]
 
 [dependencies]
 arrow = { version = "59.0.0", features = ["prettyprint"] }
+byteorder = "1.5.0"
+bzip2 = "0.4.4"
 clap = { version = "4.6.1", features = ["derive"] }
 etherparse = "0.20.1"
+lz4_flex = "0.11.1"
+# Pure-Rust LZO1X decoder (MIT, clean-room lzokay port) for the vendored nfdump
+# reader. Avoids the GPL liblzo2 system dependency so flowprep stays a single
+# static binary with no runtime deps.
+lzokay-native = { version = "0.1", default-features = false, features = ["decompress"] }
 parquet = { version = "59.0.0", features = ["arrow", "zstd"] }
 pcap-parser = "0.17.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+zstd = "0.13"
 
 [profile.release]
 lto = true

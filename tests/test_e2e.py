@@ -1,8 +1,10 @@
-"""End-to-end smoke test: synthetic pcap -> parquet, CICIDS-style CSV -> parquet.
+"""End-to-end smoke test: synthetic pcap/CSV/OCSF -> parquet, plus the bundled
+nfcapd binary fixture -> parquet.
 
 Requires `pip install dpkt pyarrow` and a built binary (`cargo build
 --release`). Set FLOWPREP_BIN to test an alternative binary; defaults to
-the release build in this repo.
+the release build in this repo. The nfcapd case reads the committed
+`examples/sample.nfcapd` fixture natively — no `nfdump` CLI required.
 """
 
 import os
@@ -13,10 +15,10 @@ import pyarrow.parquet as pq
 
 import dpkt
 
-_DEFAULT_BIN = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "target", "release", "flowprep"
-)
+_REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+_DEFAULT_BIN = os.path.join(_REPO, "target", "release", "flowprep")
 FLOWPREP_BIN = os.environ.get("FLOWPREP_BIN", _DEFAULT_BIN)
+EXAMPLES = os.path.join(_REPO, "examples")
 
 
 def build_test_pcap(path):
@@ -148,6 +150,28 @@ def main():
     assert rows[1]["flow_dur"] == 0.15, f"elapsed_time ms->s wrong: {rows[1]['flow_dur']}"
     assert rows[1]["fwd_bytes"] == 90, "top-level bytes fallback wrong"
     assert rows[1]["protocol"] == 17, "protocol_num passthrough wrong"
+
+    # nfcapd: bundled binary fixture (5 NetFlow v5 records captured by nfdump),
+    # read natively from nfdump's V2/V3 on-disk format.
+    r = subprocess.run(
+        [FLOWPREP_BIN, "nfcapd", os.path.join(EXAMPLES, "sample.nfcapd"), "/tmp/flowprep_nfcapd.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, "nfcapd conversion failed"
+
+    t = pq.read_table("/tmp/flowprep_nfcapd.parquet")
+    print(t.to_pydict())
+    assert t.num_rows == 5, f"expected 5 flows, got {t.num_rows}"
+    by_key = {(x["src_ip"], x["dest_ip"], x["src_port"], x["dest_port"]): x for x in t.to_pylist()}
+    tcp = by_key[("10.0.0.1", "10.0.0.2", 44321, 443)]
+    assert tcp["protocol"] == 6 and tcp["fwd_bytes"] == 1200 and tcp["fwd_pkts"] == 8, "nfcapd tcp fields wrong"
+    assert tcp["bwd_bytes"] == 0, "single-counter bwd should be zero-filled"
+    assert tcp["timestamp"] == 1699999900_000000, "nfcapd ms->us timestamp wrong"
+    assert tcp["flow_dur"] == 2.5, f"nfcapd duration wrong: {tcp['flow_dur']}"
+    udp = by_key[("8.8.8.8", "192.168.1.10", 53, 51000)]
+    assert udp["protocol"] == 17 and udp["fwd_bytes"] == 180, "nfcapd udp fields wrong"
+    assert round(udp["flow_dur"], 3) == 0.001, f"nfcapd sub-ms duration wrong: {udp['flow_dur']}"
 
     print("ALL TESTS PASSED")
 

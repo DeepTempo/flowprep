@@ -23,4 +23,9 @@ time $BIN ocsf examples/ocsf_sample.ndjson /tmp/flowprep_demo_ocsf.parquet
 $BIN peek /tmp/flowprep_demo_ocsf.parquet -n 5
 
 echo
-echo "Demo outputs: /tmp/flowprep_demo_pcap.parquet /tmp/flowprep_demo_cic.parquet /tmp/flowprep_demo_ocsf.parquet"
+echo "=== 4. nfdump/nfcapd binary flow file (V2/V3, no nfdump CLI) -> canonical ==="
+time $BIN nfcapd examples/sample.nfcapd /tmp/flowprep_demo_nfcapd.parquet
+$BIN peek /tmp/flowprep_demo_nfcapd.parquet -n 5
+
+echo
+echo "Demo outputs: /tmp/flowprep_demo_pcap.parquet /tmp/flowprep_demo_cic.parquet /tmp/flowprep_demo_ocsf.parquet /tmp/flowprep_demo_nfcapd.parquet"

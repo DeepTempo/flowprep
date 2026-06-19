@@ -1,4 +1,6 @@
 mod canonicalize;
+mod nfcapd;
+mod nfdump;
 mod ocsf;
 mod pcap;
 mod schema;
@@ -24,6 +26,8 @@ enum Command {
     Canonicalize { input: String, output: String },
     /// OCSF Network Activity JSON/NDJSON -> canonical parquet
     Ocsf { input: String, output: String },
+    /// nfdump/nfcapd binary flow file -> canonical parquet
+    Nfcapd { input: String, output: String },
     /// print the first rows of a parquet file
     Peek {
         input: String,
@@ -54,6 +58,8 @@ fn main() {
         Command::Ocsf { input, output } => {
             ocsf::ocsf_to_parquet(input, output).map(|n| println!("Wrote {n} flows to {output}"))
         }
+        Command::Nfcapd { input, output } => nfcapd::nfcapd_to_parquet(input, output)
+            .map(|n| println!("Wrote {n} flows to {output}")),
         Command::Peek { input, rows } => peek(input, *rows),
     };
     if let Err(e) = result {

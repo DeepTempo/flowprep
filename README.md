@@ -66,7 +66,7 @@ cargo build --release
 ./demo.sh
 ```
 
-Four subcommands:
+Five subcommands:
 
 ```bash
 # 1. Raw packet captures -> bidirectional flow records
@@ -78,7 +78,10 @@ flowprep canonicalize cic_export.csv flows.parquet
 # 3. OCSF Network Activity events (JSON/NDJSON) -> the canonical schema
 flowprep ocsf network_activity.ndjson flows.parquet
 
-# 4. Inspect any parquet file from the terminal, no Python required
+# 4. nfdump/nfcapd binary flow files -> the canonical schema
+flowprep nfcapd nfcapd.202401011200 flows.parquet
+
+# 5. Inspect any parquet file from the terminal, no Python required
 flowprep peek flows.parquet -n 20
 ```
 
@@ -131,6 +134,23 @@ single object. Events are deserialized into a typed view of the standard's
 shape rather than navigated as loose JSON, and malformed records or close
 events missing required fields are reported as errors rather than silently
 dropped — partial or empty output never looks like success.
+
+### nfdump/nfcapd binary flow files
+
+nfcapd files are nfdump's native on-disk format: a typed binary container of
+already-aggregated flow records (NetFlow v5/v9, IPFIX, sFlow), not packets. So
+unlike the pcap reader there is no 5-tuple aggregation — each stored record maps
+to one canonical flow. flowprep reads both the V1 "common" record written by
+nfdump 1.6.x and the V2 "v3" extension record written by 1.7.x, and transparently
+decompresses LZO/BZ2/LZ4/ZSTD/uncompressed data blocks. Endpoints, ports, and
+protocol map straight across; nfdump's millisecond-epoch times become the
+canonical epoch-microsecond timestamp and float-second duration. Biflow exporters
+carry a reverse counter, which maps to `bwd_bytes`/`bwd_pkts`; single-counter
+records zero-fill the backward side, the same convention the CSV and OCSF readers
+use. There is **no `nfdump` CLI dependency** — the container is parsed in-process,
+so flowprep stays a single static binary you can copy to a sensor box. (The very
+old pre-1.6 "common v0" record type is not decoded; such files convert to zero
+flows and are reported as an error rather than a silent empty file.)
 
 ### Bidirectional flow aggregation (pcap)
 
@@ -223,7 +243,6 @@ fix benefits our pipeline and yours equally.
 
 ## Roadmap
 
-- nfcapd (nfdump binary) reader
 - Zeek `conn.log` reader
 - IPv6 flow-tuple test coverage and pcapng per-interface timestamp resolutions
 - Published canonical-parquet versions of common research datasets
@@ -251,6 +270,14 @@ binaries, attaches them to a GitHub release, and publishes the crate to
 crates.io using `CARGO_REGISTRY_TOKEN`.
 
 ## Acknowledgments
+
+The nfdump/nfcapd binary reader (`src/nfdump/`) is vendored from the
+[`nfdump`](https://github.com/markzz/rust-nfdump) crate (ISC, © 2023 Mark King),
+with one functional change: LZO1X block decompression uses the pure-Rust,
+MIT-licensed [`lzokay-native`](https://github.com/arma-tools/lzokay-native-rs)
+(a clean-room [lzokay](https://github.com/jackoalan/lzokay) port) instead of the
+`minilzo` FFI binding, so flowprep does not link the GPL system `liblzo2` and
+stays a single static binary. See [`src/nfdump/mod.rs`](src/nfdump/mod.rs).
 
 The bundled example slice derives from the CIC-IDS-2017 dataset:
 Sharafaldin, Lashkari & Ghorbani, *"Toward Generating a New Intrusion
