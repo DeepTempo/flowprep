@@ -201,6 +201,11 @@ $ flowprep peek /tmp/cic.parquet -n 3
 +------------------+---------------+--------------+----------+-----------+-----------+-----------+----------+----------+----------+----------+--------+-------+
 ```
 
+The canonical output of this exact command is published as a ready-to-use dataset
+on the Hugging Face Hub —
+**[DeepTempo/cic-ids-2017-flowprep](https://huggingface.co/datasets/DeepTempo/cic-ids-2017-flowprep)**
+(101,094 labeled flows; drop-in for `pandas` / `polars` / `datasets`).
+
 ## Performance
 
 The per-packet decode path is exactly where interpreted languages pay the
@@ -245,7 +250,7 @@ fix benefits our pipeline and yours equally.
 
 - Zeek `conn.log` reader
 - IPv6 flow-tuple test coverage and pcapng per-interface timestamp resolutions
-- Published canonical-parquet versions of common research datasets
+- More published canonical-parquet research datasets ([CIC-IDS-2017](https://huggingface.co/datasets/DeepTempo/cic-ids-2017-flowprep) is live)
 
 Contributions welcome — especially "here is a flow export flowprep can't
 parse" issues with a small sample attached.
