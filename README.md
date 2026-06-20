@@ -271,13 +271,16 @@ crates.io using `CARGO_REGISTRY_TOKEN`.
 
 ## Acknowledgments
 
-The nfdump/nfcapd binary reader (`src/nfdump/`) is vendored from the
-[`nfdump`](https://github.com/markzz/rust-nfdump) crate (ISC, © 2023 Mark King),
-with one functional change: LZO1X block decompression uses the pure-Rust,
-MIT-licensed [`lzokay-native`](https://github.com/arma-tools/lzokay-native-rs)
-(a clean-room [lzokay](https://github.com/jackoalan/lzokay) port) instead of the
-`minilzo` FFI binding, so flowprep does not link the GPL system `liblzo2` and
-stays a single static binary. See [`src/nfdump/mod.rs`](src/nfdump/mod.rs).
+The nfdump/nfcapd binary reader (`src/nfdump/`) is a small, purpose-built parser
+that decodes only the flow-bearing fields flowprep needs. Its byte layouts are
+derived from nfdump's on-disk format ([phaag/nfdump](https://github.com/phaag/nfdump))
+and the [`nfdump`](https://github.com/markzz/rust-nfdump) crate (ISC, © 2023 Mark
+King). LZO1X block decompression uses the pure-Rust, MIT-licensed
+[`lzokay-native`](https://github.com/arma-tools/lzokay-native-rs) (a clean-room
+[lzokay](https://github.com/jackoalan/lzokay) port) rather than the GPL system
+`liblzo2`, so flowprep stays a single static binary. The reader validates every
+length before use and reports truncation or corruption as an error rather than a
+silent short read. See [`src/nfdump/mod.rs`](src/nfdump/mod.rs).
 
 The bundled example slice derives from the CIC-IDS-2017 dataset:
 Sharafaldin, Lashkari & Ghorbani, *"Toward Generating a New Intrusion
