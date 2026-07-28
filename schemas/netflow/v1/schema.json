@@ -17,7 +17,9 @@
           "first_seen",
           "firstseen",
           "_time",
-          "flow_start_milliseconds"
+          "flow_start_milliseconds",
+          "starttime",
+          "date_first_seen"
         ]
       },
       "src_ip": {
@@ -31,7 +33,9 @@
           "ipv4_address_cli",
           "srcaddr",
           "src_addr",
-          "ipv4_src_addr"
+          "ipv4_src_addr",
+          "src_ip_addr",
+          "id.orig_h"
         ]
       },
       "dest_ip": {
@@ -47,7 +51,9 @@
           "ipv4_address_serv",
           "dstaddr",
           "dst_addr",
-          "ipv4_dst_addr"
+          "ipv4_dst_addr",
+          "dst_ip_addr",
+          "id.resp_h"
         ]
       },
       "src_port": {
@@ -60,7 +66,9 @@
           "client_port",
           "srcport",
           "sport",
-          "l4_src_port"
+          "l4_src_port",
+          "src_pt",
+          "id.orig_p"
         ]
       },
       "dest_port": {
@@ -75,7 +83,9 @@
           "server_port",
           "dstport",
           "dport",
-          "l4_dst_port"
+          "l4_dst_port",
+          "dst_pt",
+          "id.resp_p"
         ]
       },
       "fwd_bytes": {
@@ -93,7 +103,11 @@
           "bytes_sent",
           "octets_fwd",
           "total_fwd_bytes",
-          "octets"
+          "octets",
+          "srcbytes",
+          "total_length_of_fwd_packets",
+          "totlen_fwd_pkts",
+          "orig_bytes"
         ]
       },
       "bwd_bytes": {
@@ -109,7 +123,10 @@
           "s_bytes_all",
           "bytes_received",
           "octets_bwd",
-          "total_bwd_bytes"
+          "total_bwd_bytes",
+          "total_length_of_bwd_packets",
+          "totlen_bwd_pkts",
+          "resp_bytes"
         ]
       },
       "fwd_pkts": {
@@ -128,7 +145,10 @@
           "packets_sent",
           "total_fwd_pkts",
           "total_fwd_packets",
-          "packets"
+          "packets",
+          "tot_fwd_pkts",
+          "total_forward_packets",
+          "orig_pkts"
         ]
       },
       "bwd_pkts": {
@@ -146,7 +166,10 @@
           "packets_out",
           "packets_received",
           "total_bwd_pkts",
-          "total_bwd_packets"
+          "total_bwd_packets",
+          "tot_bwd_pkts",
+          "total_backward_packets",
+          "resp_pkts"
         ]
       },
       "flow_dur": {
@@ -167,7 +190,8 @@
           "flow_duration_microseconds",
           "duration_ns",
           "duration_nanoseconds",
-          "flow_duration_nanoseconds"
+          "flow_duration_nanoseconds",
+          "dur"
         ],
         "unit_detection": {
           "seconds": [
@@ -176,7 +200,8 @@
             "durat",
             "flow_duration",
             "duration_sec",
-            "elapsed_time"
+            "elapsed_time",
+            "dur"
           ],
           "milliseconds": [
             "duration_ms",
@@ -223,6 +248,9 @@
     "label_fields": [
       "attack",
       "attack_type",
+      "attacktype",
+      "class",
+      "detailedlabel",
       "src_tags",
       "dst_tags"
     ],

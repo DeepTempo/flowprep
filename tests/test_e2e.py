@@ -62,8 +62,11 @@ def build_test_pcap(path):
         )
 
 
-def build_cicids_csv(path):
-    """CSV with CICIDS-style headers: spaces, mixed case, ms durations."""
+def build_generic_flow_csv(path):
+    """Generic aliased flow CSV: leading spaces in header names, an explicitly
+    ms-named duration, and epoch-seconds timestamps. Not a real vendor format —
+    it guards the alias/trim/unit machinery in isolation. Real CIC headers are
+    covered by build_cic_csv below."""
     rows = [
         "Source IP, Destination IP, Source Port, Destination Port, Flow Duration_Milliseconds, Total Fwd Bytes, Total Bwd Bytes, Protocol, Timestamp, Label",
         "192.168.1.5,10.9.9.9,51000,80,2500,1200,34000,tcp,1750000000,BENIGN",
@@ -71,6 +74,90 @@ def build_cicids_csv(path):
     ]
     with open(path, "w") as f:
         f.write("\n".join(rows))
+
+
+def build_cic_csv(path, variant):
+    """Real CICFlowMeter headers, verbatim, in both spellings that exist in the
+    wild. The previous fixture claimed to be "CICIDS-style" but invented
+    `Total Fwd Bytes` and `Flow Duration_Milliseconds` — names no CIC export
+    actually emits, which both happened to already resolve. That is why the real
+    CIC gap went unnoticed.
+
+    variant "A" = original CICIDS2017/2018 (`Source IP`, `Total Length of Fwd
+    Packets`, M/D/Y date with a single-digit hour and no seconds).
+    variant "B" = CICFlowMeter v4 (`Src IP`, `TotLen Fwd Pkts`, D/M/Y date that
+    proves its own ordering because 20 > 12, float byte counts).
+
+    Flow Duration is MICROSECONDS in both. By decision it is passed through as
+    seconds, so flow_check catches the 10^6 inflation downstream — see the
+    assertions, which pin that on purpose.
+    """
+    if variant == "A":
+        rows = [
+            "Flow ID,Source IP,Source Port,Destination IP,Destination Port,Protocol,Timestamp,Flow Duration,Total Fwd Packets,Total Backward Packets,Total Length of Fwd Packets,Total Length of Bwd Packets,Label",
+            "x-1,104.16.207.165,443,192.168.10.5,54865,6,7/7/2017 3:30,3,2,0,12,0,BENIGN",
+            "x-2,192.168.10.5,54865,104.16.207.165,443,6,7/7/2017 15:45:09,5000000,4,2,600,1200,DDoS",
+        ]
+    else:
+        rows = [
+            "Flow ID,Src IP,Src Port,Dst IP,Dst Port,Protocol,Timestamp,Flow Duration,Tot Fwd Pkts,Tot Bwd Pkts,TotLen Fwd Pkts,TotLen Bwd Pkts,Label",
+            "y-1,10.0.0.1,60602,10.0.1.2,5051,6,20/11/2020 09:50:19,38031,3,4,117.0,353.0,No Label",
+            "y-2,10.0.0.2,443,10.0.1.3,51000,17,20/11/2020 09:50:20,120,1,0,64.0,0.0,Attack",
+        ]
+    with open(path, "w") as f:
+        f.write("\n".join(rows))
+
+
+def build_argus_binetflow(path):
+    """Argus/CTU-13 `.binetflow`: verbatim real header, `YYYY/MM/DD` StartTime,
+    only a *forward* byte counter (SrcBytes) alongside two totals, plus the two
+    port shapes real Argus emits that are not numbers — hex ICMP type/code and
+    an empty field for a protocol that carries no ports."""
+    rows = [
+        "StartTime,Dur,Proto,SrcAddr,Sport,Dir,DstAddr,Dport,State,sTos,dTos,TotPkts,TotBytes,SrcBytes,Label",
+        "2011/08/18 10:21:46.633335,1.060248,tcp,93.45.239.29,1611,   ->,147.32.84.118,6881,S_RA,0,0,4,252,132,flow=Background-TCP-Attempt",
+        "2011/08/18 10:19:49.027650,279.349152,udp,62.240.166.118,1031,  <?>,147.32.84.229,13363,SRPA_PA,0,0,15,1318,955,flow=From-Botnet-V42-TCP",
+        "2011/08/18 10:22:07.160628,0.000000,icmp,147.32.84.59,0x0303,  ->,147.32.80.9,0x4fa8,URP,0,0,1,70,70,flow=Background",
+        "2011/08/18 10:23:01.000000,0.000000,arp,147.32.84.59,,  ->,147.32.85.1,,CON,0,0,1,42,42,flow=Background",
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(rows))
+
+
+def build_cidds_csv(path):
+    """CIDDS-001/002 as emitted by nfdump: space-padded fields, `Date first seen`,
+    a `class` label column (the OpenStack/ExternalServer captures use `class`, the
+    traffic__week* ones use `label`), an nfdump magnitude suffix in Bytes, and an
+    ICMP row that puts type.code in Dst Pt as a decimal."""
+    rows = [
+        "Date first seen,Duration,Proto,Src IP Addr,Src Pt,Dst IP Addr,Dst Pt,Packets,Bytes,Flows,Flags,Tos,class,attackType,attackID,attackDescription",
+        "2017-08-02 00:00:00.419,    0.003,TCP  ,192.168.210.55, 44870,192.168.100.11,   445,       2,     174,    1,.AP...,  0,normal,---,---,---",
+        "2017-08-02 00:00:01.000,   12.500,TCP  ,192.168.220.47, 55101,192.168.100.11,   445,    1500,     1.4 M,    1,.AP...,  0,attacker,dos,1,---",
+        "2017-08-02 00:00:02.000,    0.000,ICMP ,192.168.220.16,     0,192.168.100.5,   8.0,       1,      92,    1,......,  0,victim,---,---,---",
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(rows))
+
+
+def build_zeek_conn_log(path):
+    """Zeek `conn.log.labeled` (ctu-sme-11 shape): tab-separated, schema declared
+    in a `#` preamble rather than a header row, `-` for fields Zeek did not
+    measure, and dotted field names (`id.orig_h`) that normalization leaves
+    intact. Row 2 is the unset case — 15% of real rows look like this, with
+    packet counts present but duration and bytes absent."""
+    rows = [
+        "#separator \\x09",
+        "#set_separator\t,",
+        "#empty_field\t(empty)",
+        "#unset_field\t-",
+        "#path\tconn",
+        "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state\torig_pkts\tresp_pkts\tlabel\tdetailedlabel",
+        "#types\ttime\tstring\taddr\tport\taddr\tport\tenum\tstring\tinterval\tcount\tcount\tstring\tcount\tcount\tstring\tstring",
+        "1677110378.922531\tCUfDVH\t192.168.1.108\t138\t192.168.1.255\t138\tudp\t-\t2.5\t1200\t340\tSF\t8\t4\tBenign\tFrom_benign-To_benign",
+        "1677110379.100000\tCAwxab\t192.168.1.108\t54517\t1.1.1.1\t53\tudp\tdns\t-\t-\t-\tS0\t1\t0\tMalicious\tFrom_malicious",
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(rows) + "\n")
 
 
 def build_ocsf_ndjson(path):
@@ -98,7 +185,12 @@ def build_ocsf_ndjson(path):
 
 def main():
     build_test_pcap("/tmp/flowprep_test.pcap")
-    build_cicids_csv("/tmp/flowprep_test.csv")
+    build_generic_flow_csv("/tmp/flowprep_test.csv")
+    build_argus_binetflow("/tmp/flowprep_test.binetflow")
+    build_cidds_csv("/tmp/flowprep_cidds.csv")
+    build_cic_csv("/tmp/flowprep_cic_a.csv", "A")
+    build_cic_csv("/tmp/flowprep_cic_b.csv", "B")
+    build_zeek_conn_log("/tmp/flowprep_zeek_conn.log")
     build_ocsf_ndjson("/tmp/flowprep_test.ndjson")
 
     r = subprocess.run(
@@ -130,6 +222,156 @@ def main():
     assert rows[0]["timestamp"] == 1750000000_000000, "epoch-seconds detection wrong"
     assert rows[1]["timestamp"] == 1750000060_000000, "epoch-seconds detection wrong"
     assert rows[0]["label"] == "BENIGN", "label passthrough wrong"
+
+    # Argus `.binetflow`: exercises content-based reader detection (the file is
+    # comma-delimited text but is NOT named .csv), the YYYY/MM/DD StartTime
+    # rewrite, and the deliberate choice to map only SrcBytes.
+    r = subprocess.run(
+        [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_test.binetflow", "/tmp/flowprep_argus.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, f"binetflow conversion failed: {r.stderr.strip()}"
+
+    t = pq.read_table("/tmp/flowprep_argus.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert t.num_rows == 4, f"expected 4 flows, got {t.num_rows}"
+    # StartTime "2011/08/18 10:21:46.633335" -> epoch us, sub-second preserved.
+    assert rows[0]["timestamp"] == 1313662906633335, f"slash-date parse wrong: {rows[0]['timestamp']}"
+    assert rows[0]["src_ip"] == "93.45.239.29" and rows[0]["dest_ip"] == "147.32.84.118"
+    assert rows[0]["src_port"] == 1611 and rows[0]["dest_port"] == 6881
+    assert rows[0]["flow_dur"] == 1.060248, f"Dur should be seconds: {rows[0]['flow_dur']}"
+    assert rows[0]["protocol"] == 6 and rows[1]["protocol"] == 17, "Proto name mapping wrong"
+    # Argus label values keep their `flow=` prefix; interpreting them is the
+    # consumer's job, not flowprep's.
+    assert rows[0]["label"] == "flow=Background-TCP-Attempt", "label passthrough wrong"
+    # fwd_bytes comes from SrcBytes (132), NOT TotBytes (252). TotBytes/TotPkts
+    # are totals, not directional, so they are deliberately unmapped: bwd_bytes
+    # zero-fills and the packet counts stay null rather than carrying a wrong
+    # value. Recovering backward bytes needs TotBytes - SrcBytes, which requires
+    # a derived-field mechanism flowprep does not have.
+    assert rows[0]["fwd_bytes"] == 132, f"fwd_bytes should be SrcBytes: {rows[0]['fwd_bytes']}"
+    assert rows[0]["bwd_bytes"] == 0, "TotBytes must not be read as bwd_bytes"
+    assert rows[0]["fwd_pkts"] is None, "TotPkts must not be read as fwd_pkts"
+    assert rows[0]["bwd_pkts"] is None
+    # Ports that are not numbers become 0 rather than failing the file: hex ICMP
+    # type/code (row 3) and an empty field on a portless protocol (row 4).
+    # canonical src_port/dest_port are non-nullable, so 0 is the sentinel — the
+    # same one the nfcapd reader already emits for ICMP.
+    assert rows[2]["src_port"] == 0 and rows[2]["dest_port"] == 0, "hex ICMP port should coerce to 0"
+    assert rows[3]["src_port"] == 0 and rows[3]["dest_port"] == 0, "empty port should coerce to 0"
+    assert all(r["src_port"] is not None for r in rows), "ports are non-nullable"
+
+    # CIDDS: nfdump-style export. Exercises the 5 CIDDS aliases, the `class`
+    # label passthrough, nfdump magnitude suffixes in Bytes, and a decimal
+    # ICMP type.code in Dst Pt.
+    r = subprocess.run(
+        [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_cidds.csv", "/tmp/flowprep_cidds.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, f"CIDDS conversion failed: {r.stderr.strip()}"
+
+    t = pq.read_table("/tmp/flowprep_cidds.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert t.num_rows == 3, f"expected 3 flows, got {t.num_rows}"
+    assert rows[0]["timestamp"] == 1501632000419000, f"Date first seen wrong: {rows[0]['timestamp']}"
+    assert rows[0]["src_ip"] == "192.168.210.55" and rows[0]["dest_ip"] == "192.168.100.11"
+    assert rows[0]["src_port"] == 44870 and rows[0]["dest_port"] == 445, "Src Pt/Dst Pt wrong"
+    assert rows[0]["flow_dur"] == 0.003, f"Duration should be seconds: {rows[0]['flow_dur']}"
+    assert rows[0]["protocol"] == 6, "space-padded 'TCP  ' should map to 6"
+    # CIDDS rows are unidirectional, so its single Bytes total IS that row's
+    # forward volume; bwd zero-fills correctly.
+    assert rows[0]["fwd_bytes"] == 174 and rows[0]["bwd_bytes"] == 0
+    # nfdump magnitude suffix: "1.4 M" -> 1_400_000, not null.
+    assert rows[1]["fwd_bytes"] == 1_400_000, f"suffix expansion wrong: {rows[1]['fwd_bytes']}"
+    # ICMP type.code "8.0" in Dst Pt is not a port -> coerced to 0.
+    assert rows[2]["dest_port"] == 0, "decimal ICMP type.code should coerce to 0"
+    # `class` survives as ground truth.
+    assert rows[0]["class"] == "normal" and rows[1]["class"] == "attacker"
+    assert rows[1]["attacktype"] == "dos", "attackType should survive as attacktype"
+
+    # CIC variant A — original CICIDS2017/2018 spelling. Date order cannot be
+    # proven from the data (7/7/2017 has no component over 12), so it is assumed
+    # M/D/Y and that assumption is logged.
+    r = subprocess.run(
+        [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_cic_a.csv", "/tmp/flowprep_cic_a.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, f"CIC variant A failed: {r.stderr.strip()}"
+    assert "ASSUMED M/D/YYYY" in r.stderr, "an unprovable date order must be logged as assumed"
+
+    t = pq.read_table("/tmp/flowprep_cic_a.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert rows[0]["src_ip"] == "104.16.207.165" and rows[0]["dest_port"] == 54865
+    assert rows[0]["fwd_bytes"] == 12, "Total Length of Fwd Packets -> fwd_bytes"
+    assert rows[1]["fwd_bytes"] == 600 and rows[1]["bwd_bytes"] == 1200
+    assert rows[0]["fwd_pkts"] == 2, "Total Fwd Packets -> fwd_pkts"
+    # 7/7/2017 3:30 read month-first, single-digit hour zero-padded, no seconds.
+    assert rows[0]["timestamp"] == 1499398200000000, f"date rewrite wrong: {rows[0]['timestamp']}"
+    assert rows[1]["timestamp"] == 1499442309000000, "HH:MM:SS form should parse too"
+    # Flow Duration is MICROSECONDS but is deliberately passed through as
+    # seconds; flow_check's duration.implausible_magnitude catches the 10^6
+    # inflation downstream. This assertion pins that decision on purpose —
+    # do NOT "fix" it to 5.0 without revisiting it.
+    assert rows[1]["flow_dur"] == 5_000_000.0, f"duration must pass through: {rows[1]['flow_dur']}"
+    assert rows[0]["label"] == "BENIGN"
+
+    # CIC variant B — CICFlowMeter v4 spelling. 20/11/2020 proves D/M/Y.
+    r = subprocess.run(
+        [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_cic_b.csv", "/tmp/flowprep_cic_b.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, f"CIC variant B failed: {r.stderr.strip()}"
+    assert "D/M/YYYY (proven" in r.stderr, "20/11/2020 should prove day-first ordering"
+
+    t = pq.read_table("/tmp/flowprep_cic_b.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert rows[0]["src_ip"] == "10.0.0.1" and rows[0]["src_port"] == 60602
+    # Float byte counts round to i64.
+    assert rows[0]["fwd_bytes"] == 117 and rows[0]["bwd_bytes"] == 353
+    assert rows[0]["fwd_pkts"] == 3 and rows[0]["bwd_pkts"] == 4, "Tot Fwd/Bwd Pkts"
+    # 20 November 2020 09:50:19 UTC, NOT 11 August (which month-first would give).
+    assert rows[0]["timestamp"] == 1605865819000000, f"D/M/Y parse wrong: {rows[0]['timestamp']}"
+    assert rows[0]["label"] == "No Label"
+
+    # Zeek conn.log.labeled: schema comes from the `#` preamble, not a header
+    # row, and unset numeric fields ("-") are substituted with 0.
+    r = subprocess.run(
+        [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_zeek_conn.log", "/tmp/flowprep_zeek.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, f"Zeek conn.log conversion failed: {r.stderr.strip()}"
+    assert "substituted 0 for 3 unset" in r.stderr, "unset duration/orig_bytes/resp_bytes counted"
+
+    t = pq.read_table("/tmp/flowprep_zeek.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert t.num_rows == 2, f"expected 2 flows, got {t.num_rows}"
+    # ts is an epoch double, so the magnitude path converts it to microseconds.
+    assert rows[0]["timestamp"] == 1677110378922531, f"epoch ts wrong: {rows[0]['timestamp']}"
+    # Dotted field names resolve literally: id.orig_h/id.resp_p etc.
+    assert rows[0]["src_ip"] == "192.168.1.108" and rows[0]["dest_ip"] == "192.168.1.255"
+    assert rows[0]["src_port"] == 138 and rows[0]["dest_port"] == 138
+    assert rows[0]["flow_dur"] == 2.5, "Zeek duration is already seconds"
+    assert rows[0]["fwd_bytes"] == 1200 and rows[0]["bwd_bytes"] == 340
+    assert rows[0]["fwd_pkts"] == 8 and rows[0]["bwd_pkts"] == 4
+    assert rows[0]["protocol"] == 17
+    # Row 2: duration/orig_bytes/resp_bytes were "-" -> 0, packets still real.
+    # That leaves zero bytes against non-zero packets, which is exactly what
+    # flow_check's bytes.zero_with_packets reports — visible, not silent.
+    assert rows[1]["flow_dur"] == 0.0 and rows[1]["fwd_bytes"] == 0
+    assert rows[1]["fwd_pkts"] == 1, "packet counts must survive the substitution"
+    # Both label columns come through.
+    assert rows[1]["label"] == "Malicious"
+    assert rows[0]["detailedlabel"] == "From_benign-To_benign"
 
     r = subprocess.run(
         [FLOWPREP_BIN, "ocsf", "/tmp/flowprep_test.ndjson", "/tmp/flowprep_ocsf.parquet"],

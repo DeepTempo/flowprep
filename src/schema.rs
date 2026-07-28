@@ -180,12 +180,31 @@ pub fn normalize_name(name: &str) -> String {
     name.trim().to_lowercase().replace([' ', '-'], "_")
 }
 
+/// Resolve a protocol name (or a numeric string) to its IANA protocol number.
+///
+/// NOTE: this lowercases and trims but deliberately does NOT use
+/// `normalize_name`, so hyphens survive. Keys must be written as the exporter
+/// spells them — `"ipv6-icmp"`, not `"ipv6_icmp"`, which would never match.
+///
+/// `None` means "no IANA IP protocol number", which covers two different cases:
+/// an unrecognized string, and a value that is genuinely not an IP protocol.
+/// Argus reports link-layer and application protocols in the same column —
+/// `arp` and `rarp` are layer 2 (EtherType, not IP), while `rtp`, `rtcp` and
+/// `udt` ride over UDP and have no protocol number of their own. Those are
+/// deliberately left unmapped; do not invent numbers for them. They surface
+/// downstream as a null protocol alongside a zero port, which is a detectable
+/// signature for a data-quality check rather than something to paper over here.
 pub fn protocol_number(name: &str) -> Option<i32> {
     match name.trim().to_lowercase().as_str() {
         "tcp" => Some(6),
         "udp" => Some(17),
         "icmp" => Some(1),
-        "icmpv6" => Some(58),
+        // 58 has three spellings in the wild: IANA's official `ipv6-icmp`, and
+        // the colloquial `icmpv6`/`icmp6`. Real Argus captures use the first.
+        "ipv6-icmp" | "icmpv6" | "icmp6" => Some(58),
+        "igmp" => Some(2),
+        "ipv6" => Some(41),
+        "pim" => Some(103),
         "gre" => Some(47),
         "esp" => Some(50),
         other => other.parse::<i32>().ok(),
@@ -209,5 +228,58 @@ impl SchemaSpec {
             }
         }
         resolved
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_ip_protocol_names_and_spellings() {
+        assert_eq!(protocol_number("tcp"), Some(6));
+        assert_eq!(protocol_number("UDP"), Some(17));
+        assert_eq!(protocol_number("  TCP  "), Some(6), "values arrive padded");
+        assert_eq!(protocol_number("igmp"), Some(2));
+        assert_eq!(protocol_number("ipv6"), Some(41));
+        assert_eq!(protocol_number("pim"), Some(103));
+        // All three spellings of 58, including IANA's hyphenated official name.
+        for spelling in ["ipv6-icmp", "icmpv6", "icmp6", "IPv6-ICMP"] {
+            assert_eq!(protocol_number(spelling), Some(58), "{spelling}");
+        }
+        // Numeric passthrough for exporters that already emit the number.
+        assert_eq!(protocol_number("6"), Some(6));
+        assert_eq!(protocol_number("132"), Some(132));
+    }
+
+    /// Argus reports link-layer and application protocols in the same column.
+    /// None of these has an IANA IP protocol number, so `None` is the correct
+    /// answer — not a gap to be filled with an invented value.
+    #[test]
+    fn leaves_non_ip_protocols_unmapped() {
+        for not_ip in ["arp", "rarp", "rtp", "rtcp", "udt", "ipx/spx"] {
+            assert_eq!(
+                protocol_number(not_ip),
+                None,
+                "{not_ip} is not an IP protocol and must not be given a number"
+            );
+        }
+        assert_eq!(protocol_number(""), None);
+        assert_eq!(protocol_number("nonsense"), None);
+    }
+
+    /// `protocol_number` lowercases and trims but does NOT apply
+    /// `normalize_name`, so hyphens survive. A key written with an underscore
+    /// would never match what an exporter emits.
+    #[test]
+    fn protocol_lookup_does_not_normalize_hyphens() {
+        assert_eq!(normalize_name("ipv6-icmp"), "ipv6_icmp");
+        assert_eq!(protocol_number("ipv6-icmp"), Some(58));
+        assert_eq!(
+            protocol_number("ipv6_icmp"),
+            None,
+            "the underscored form is not what exporters write; \
+             new entries must use the hyphenated spelling"
+        );
     }
 }
