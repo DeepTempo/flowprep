@@ -72,8 +72,11 @@ Five subcommands:
 # 1. Raw packet captures -> bidirectional flow records
 flowprep pcap capture.pcap flows.parquet
 
-# 2. Any aliased flow table (CSV or parquet) -> the canonical schema
+# 2. Any aliased flow table (CSV, parquet, Zeek TSV log, Argus .binetflow)
+#    -> the canonical schema
 flowprep canonicalize cic_export.csv flows.parquet
+flowprep canonicalize conn.log.labeled flows.parquet
+flowprep canonicalize capture.binetflow flows.parquet
 
 # 3. OCSF Network Activity events (JSON/NDJSON) -> the canonical schema
 flowprep ocsf network_activity.ndjson flows.parquet
@@ -160,6 +163,19 @@ forward/backward byte and packet counters. Flows split on a 60s idle
 timeout and a 1h maximum duration. The reader streams pcap and pcapng,
 keeps constant memory on the packet path, and is robust to the
 slightly-out-of-order packets real captures contain.
+
+### Zeek logs and research exports
+
+`canonicalize` also reads **Zeek TSV logs** (`conn.log`, including labeled
+variants like IoT-23's `conn.log.labeled`) natively: the `#separator`,
+`#fields`, and `#types` directives drive parsing, and Zeek's unset marker
+(`-`) zero-fills counters the same way single-counter sources do. **Argus
+`.binetflow` exports** (CTU-13, IoT-23) are detected by content, not
+extension, with their slash-formatted timestamps and hex ICMP type/code
+port values handled. Header quirks from other research exports are
+normalized too: tstat's `:N` column-index suffixes (`c_bytes_all:9`) and
+`#N#` first-column prefix, CIDDS's padded values and nfdump-style `1.5 M`
+byte counts, and CICFlowMeter's provable day-first datetime strings.
 
 ### Label passthrough
 
@@ -248,7 +264,6 @@ fix benefits our pipeline and yours equally.
 
 ## Roadmap
 
-- Zeek `conn.log` reader
 - IPv6 flow-tuple test coverage and pcapng per-interface timestamp resolutions
 - More published canonical-parquet research datasets ([CIC-IDS-2017](https://huggingface.co/datasets/DeepTempo/cic-ids-2017-flowprep) is live)
 

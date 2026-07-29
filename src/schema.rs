@@ -177,6 +177,23 @@ pub fn load_schema_spec() -> SchemaSpec {
 }
 
 pub fn normalize_name(name: &str) -> String {
+    let mut name = name.trim();
+    // tstat exports prefix the first header column with "#" or "#N#"
+    // (e.g. "#c_ip:1" in log_udp_complete, "#15#c_ip:1" in log_tcp_complete).
+    if let Some(rest) = name.strip_prefix('#') {
+        name = rest;
+        if let Some((index, tail)) = name.split_once('#') {
+            if !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) {
+                name = tail;
+            }
+        }
+    }
+    // tstat exports suffix every column with its 1-based index (e.g. "c_bytes_all:9").
+    if let Some((head, index)) = name.rsplit_once(':') {
+        if !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) {
+            name = head;
+        }
+    }
     name.trim().to_lowercase().replace([' ', '-'], "_")
 }
 
@@ -266,6 +283,69 @@ mod tests {
         }
         assert_eq!(protocol_number(""), None);
         assert_eq!(protocol_number("nonsense"), None);
+    }
+
+    #[test]
+    fn normalize_strips_tstat_decorations() {
+        assert_eq!(normalize_name("#15#c_ip:1"), "c_ip");
+        assert_eq!(normalize_name("#c_ip:1"), "c_ip");
+        assert_eq!(normalize_name("c_bytes_all:9"), "c_bytes_all");
+        assert_eq!(normalize_name("durat:31"), "durat");
+        assert_eq!(normalize_name("c_tls_SNI:116"), "c_tls_sni");
+    }
+
+    #[test]
+    fn normalize_keeps_plain_names() {
+        assert_eq!(
+            normalize_name(" Total Length of Fwd Packets"),
+            "total_length_of_fwd_packets"
+        );
+        assert_eq!(normalize_name("id.orig_h"), "id.orig_h");
+    }
+
+    /// In tstat the client (`c_*`) is the connection initiator, i.e. the
+    /// canonical source — corroborated by real AIT rows where `c_ip` equals
+    /// `ipv4_address_cli`. The alias table used to read `s_` as "source",
+    /// which flipped the topology and counted client bytes as forward while
+    /// calling the server the source. Pin the coherent mapping.
+    #[test]
+    fn tstat_client_is_source_and_forward() {
+        let spec = load_schema_spec();
+        let header: Vec<String> = [
+            "#15#c_ip:1",
+            "c_port:2",
+            "c_pkts_all:3",
+            "c_bytes_all:9",
+            "s_ip:15",
+            "s_port:16",
+            "s_pkts_all:17",
+            "s_bytes_all:23",
+            "durat:31",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let resolved = spec.resolve_columns(&header);
+        assert_eq!(resolved["src_ip"], "#15#c_ip:1");
+        assert_eq!(resolved["src_port"], "c_port:2");
+        assert_eq!(resolved["fwd_bytes"], "c_bytes_all:9");
+        assert_eq!(resolved["fwd_pkts"], "c_pkts_all:3");
+        assert_eq!(resolved["dest_ip"], "s_ip:15");
+        assert_eq!(resolved["dest_port"], "s_port:16");
+        assert_eq!(resolved["bwd_bytes"], "s_bytes_all:23");
+        assert_eq!(resolved["bwd_pkts"], "s_pkts_all:17");
+        assert_eq!(resolved["flow_dur"], "durat:31");
+    }
+
+    /// tstat durations are milliseconds: in real log_tcp_complete rows,
+    /// `durat` equals `last - first` which are epoch-millisecond stamps
+    /// (e.g. durat=2188.354 for a flow whose first/last differ by 2188 ms).
+    /// log_udp_complete has no `durat`; its per-side `c_durat` is also ms.
+    #[test]
+    fn tstat_durations_are_milliseconds() {
+        let spec = load_schema_spec();
+        assert_eq!(spec.duration_divisors.get("durat"), Some(&1e3));
+        assert_eq!(spec.duration_divisors.get("c_durat"), Some(&1e3));
     }
 
     /// `protocol_number` lowercases and trims but does NOT apply

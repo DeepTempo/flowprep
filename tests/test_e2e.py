@@ -160,6 +160,42 @@ def build_zeek_conn_log(path):
         f.write("\n".join(rows) + "\n")
 
 
+def build_tstat_tcp_csv(path):
+    """tstat log_tcp_complete as scraped for AIT: every column carries a `:N`
+    index suffix and the first is prefixed `#15#`. In tstat the client (`c_*`)
+    initiates the connection, so it is the canonical source — the real rows
+    corroborate this (`c_ip` equals the scraper's `ipv4_address_cli`). `durat`
+    is milliseconds: in real rows it equals `last - first`, which are
+    epoch-millisecond stamps."""
+    rows = [
+        "#15#c_ip:1,c_port:2,c_pkts_all:3,c_bytes_all:9,s_ip:15,s_port:16,"
+        "s_pkts_all:17,s_bytes_all:23,first:29,last:30,durat:31,"
+        "timestamp,role_cli,ipv4_address_cli,network_cli,role_serv,ipv4_address_serv,network_serv,label",
+        "192.168.130.77,46950,509,494,91.189.88.142,80,568,1252657,"
+        "1642209153960.206,1642209156148.560,2188.354,"
+        "2022-01-15 01:12:33.960206,attacker_0,192.168.130.77,internet,external,91.189.88.142,external,browsing/update",
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(rows))
+
+
+def build_tstat_udp_csv(path):
+    """tstat log_udp_complete (AIT fox_netflows shape): the first header column
+    is prefixed with a bare `#` (no index, unlike log_tcp_complete's `#15#`),
+    there is no flow-level `durat` — only the per-side millisecond `c_durat` —
+    and byte/packet counters are per side, so client maps to forward."""
+    rows = [
+        "#c_ip:1,c_port:2,c_first_abs:3,c_durat:4,c_bytes_all:5,c_pkts_all:6,c_type:9,"
+        "s_ip:10,s_port:11,s_durat:13,s_bytes_all:14,s_pkts_all:15,fqdn:19,"
+        "timestamp,role_cli,ipv4_address_cli,role_serv,ipv4_address_serv,label",
+        "192.168.255.254,32773,1642204803117.595,1.772,250,1,dns,"
+        "192.168.130.77,53,1.100,269,1,intranet.company.com,"
+        "2022-01-15 00:00:03.117595,client_0,192.168.255.254,dns_server,192.168.130.77,data exfiltration",
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(rows))
+
+
 def build_ocsf_ndjson(path):
     """OCSF Network Activity NDJSON: nested fields, ms units, a non-close event."""
     rows = [
@@ -191,6 +227,8 @@ def main():
     build_cic_csv("/tmp/flowprep_cic_a.csv", "A")
     build_cic_csv("/tmp/flowprep_cic_b.csv", "B")
     build_zeek_conn_log("/tmp/flowprep_zeek_conn.log")
+    build_tstat_tcp_csv("/tmp/flowprep_tstat_tcp.csv")
+    build_tstat_udp_csv("/tmp/flowprep_tstat_udp.csv")
     build_ocsf_ndjson("/tmp/flowprep_test.ndjson")
 
     r = subprocess.run(
@@ -372,6 +410,50 @@ def main():
     # Both label columns come through.
     assert rows[1]["label"] == "Malicious"
     assert rows[0]["detailedlabel"] == "From_benign-To_benign"
+
+    # tstat log_tcp_complete (AIT): `:N` suffixes and the `#15#` prefix are
+    # stripped, the client (`c_*`) is the source/forward side, and `durat`
+    # (milliseconds) converts to seconds.
+    r = subprocess.run(
+        [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_tstat_tcp.csv", "/tmp/flowprep_tstat_tcp.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, f"tstat TCP conversion failed: {r.stderr.strip()}"
+
+    t = pq.read_table("/tmp/flowprep_tstat_tcp.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert t.num_rows == 1, f"expected 1 flow, got {t.num_rows}"
+    # Client initiates, so c_ip is the source — matching ipv4_address_cli.
+    assert rows[0]["src_ip"] == "192.168.130.77" and rows[0]["dest_ip"] == "91.189.88.142"
+    assert rows[0]["src_port"] == 46950 and rows[0]["dest_port"] == 80
+    assert rows[0]["fwd_bytes"] == 494 and rows[0]["bwd_bytes"] == 1252657
+    assert rows[0]["fwd_pkts"] == 509 and rows[0]["bwd_pkts"] == 568
+    # durat=2188.354 ms == last - first (epoch-ms stamps in the same row).
+    assert rows[0]["flow_dur"] == 2.188354, f"durat ms->s wrong: {rows[0]['flow_dur']}"
+    assert rows[0]["timestamp"] == 1642209153960206, f"timestamp wrong: {rows[0]['timestamp']}"
+    assert rows[0]["label"] == "browsing/update"
+
+    # tstat log_udp_complete (AIT): bare-`#` header prefix, and flow_dur comes
+    # from the per-side millisecond `c_durat` (there is no flow-level durat).
+    r = subprocess.run(
+        [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_tstat_udp.csv", "/tmp/flowprep_tstat_udp.parquet"],
+        capture_output=True, text=True,
+    )
+    print(r.stdout.strip(), r.stderr.strip())
+    assert r.returncode == 0, f"tstat UDP conversion failed: {r.stderr.strip()}"
+
+    t = pq.read_table("/tmp/flowprep_tstat_udp.parquet")
+    print(t.to_pydict())
+    rows = t.to_pylist()
+    assert t.num_rows == 1, f"expected 1 flow, got {t.num_rows}"
+    assert rows[0]["src_ip"] == "192.168.255.254" and rows[0]["dest_ip"] == "192.168.130.77"
+    assert rows[0]["src_port"] == 32773 and rows[0]["dest_port"] == 53
+    assert rows[0]["fwd_bytes"] == 250 and rows[0]["bwd_bytes"] == 269
+    assert rows[0]["fwd_pkts"] == 1 and rows[0]["bwd_pkts"] == 1
+    assert rows[0]["flow_dur"] == 0.001772, f"c_durat ms->s wrong: {rows[0]['flow_dur']}"
+    assert rows[0]["label"] == "data exfiltration"
 
     r = subprocess.run(
         [FLOWPREP_BIN, "ocsf", "/tmp/flowprep_test.ndjson", "/tmp/flowprep_ocsf.parquet"],

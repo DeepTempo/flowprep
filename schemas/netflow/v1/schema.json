@@ -27,7 +27,7 @@
         "description": "Source IP address",
         "aliases": [
           "src_ip",
-          "s_ip",
+          "c_ip",
           "source_ip",
           "client_ip",
           "ipv4_address_cli",
@@ -46,7 +46,7 @@
           "dst_ip",
           "destination_ip",
           "d_ip",
-          "c_ip",
+          "s_ip",
           "server_ip",
           "ipv4_address_serv",
           "dstaddr",
@@ -61,7 +61,7 @@
         "description": "Source TCP/UDP port",
         "aliases": [
           "src_port",
-          "s_port",
+          "c_port",
           "source_port",
           "client_port",
           "srcport",
@@ -79,7 +79,7 @@
           "dst_port",
           "destination_port",
           "d_port",
-          "c_port",
+          "s_port",
           "server_port",
           "dstport",
           "dport",
@@ -148,7 +148,8 @@
           "packets",
           "tot_fwd_pkts",
           "total_forward_packets",
-          "orig_pkts"
+          "orig_pkts",
+          "c_pkts_all"
         ]
       },
       "bwd_pkts": {
@@ -169,7 +170,8 @@
           "total_bwd_packets",
           "tot_bwd_pkts",
           "total_backward_packets",
-          "resp_pkts"
+          "resp_pkts",
+          "s_pkts_all"
         ]
       },
       "flow_dur": {
@@ -191,13 +193,13 @@
           "duration_ns",
           "duration_nanoseconds",
           "flow_duration_nanoseconds",
-          "dur"
+          "dur",
+          "c_durat"
         ],
         "unit_detection": {
           "seconds": [
             "flow_dur",
             "duration",
-            "durat",
             "flow_duration",
             "duration_sec",
             "elapsed_time",
@@ -206,7 +208,9 @@
           "milliseconds": [
             "duration_ms",
             "flow_duration_milliseconds",
-            "durationms"
+            "durationms",
+            "durat",
+            "c_durat"
           ],
           "microseconds": [
             "duration_us",
