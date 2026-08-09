@@ -63,3 +63,4 @@ jobs:
         run: |
           python tests/test_e2e.py
           python tests/test_modbus_e2e.py
+          python tests/test_modbus_stream_e2e.py

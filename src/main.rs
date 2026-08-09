@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "flowprep",
-    about = "Convert network telemetry into ML-ready canonical NetFlow parquet"
+    about = "Convert network telemetry into ML-ready flow and protocol observations"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,6 +30,27 @@ enum Command {
         /// TCP port used by Modbus servers in this capture
         #[arg(long, default_value_t = 502)]
         server_port: u16,
+    },
+    /// continuously decode a PCAP stream -> low-latency NDJSON events
+    ModbusStream {
+        /// PCAP/PCAPNG input path, or '-' for stdin
+        #[arg(long, default_value = "-")]
+        input: String,
+        /// NDJSON output path (append mode), or '-' for stdout
+        #[arg(long, default_value = "-")]
+        output: String,
+        /// TCP port used by Modbus servers in this capture
+        #[arg(long, default_value_t = 502)]
+        server_port: u16,
+        /// Stable deployment identity attached to every event
+        #[arg(long, default_value = "flowprep-local")]
+        sensor_id: String,
+        /// Time before an unmatched request becomes a terminal event
+        #[arg(long, default_value_t = 5000)]
+        request_timeout_ms: u64,
+        /// Flush NDJSON after this many events; 1 minimizes latency
+        #[arg(long, default_value_t = 1)]
+        flush_every: usize,
     },
     /// aliased parquet/CSV flow table -> canonical parquet
     Canonicalize { input: String, output: String },
@@ -68,6 +89,22 @@ fn main() {
             server_port,
         } => modbus::modbus_to_parquet(input, output, *server_port)
             .map(|summary| println!("Wrote Modbus {summary} to {output}")),
+        Command::ModbusStream {
+            input,
+            output,
+            server_port,
+            sensor_id,
+            request_timeout_ms,
+            flush_every,
+        } => modbus::modbus_stream_to_ndjson(
+            input,
+            output,
+            *server_port,
+            sensor_id,
+            *request_timeout_ms,
+            *flush_every,
+        )
+        .map(|summary| eprintln!("Modbus stream finished: {summary}")),
         Command::Canonicalize { input, output } => canonicalize::canonicalize_file(input, output)
             .map(|n| println!("Wrote {n} flows to {output}")),
         Command::Ocsf { input, output } => {
