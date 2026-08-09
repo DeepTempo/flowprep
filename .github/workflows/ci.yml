@@ -59,5 +59,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install dpkt pyarrow
 
-      - name: Run e2e smoke test
-        run: python tests/test_e2e.py
+      - name: Run e2e smoke tests
+        run: |
+          python tests/test_e2e.py
+          python tests/test_modbus_e2e.py

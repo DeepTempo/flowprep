@@ -66,25 +66,30 @@ cargo build --release
 ./demo.sh
 ```
 
-Five subcommands:
+Six subcommands:
 
 ```bash
 # 1. Raw packet captures -> bidirectional flow records
 flowprep pcap capture.pcap flows.parquet
 
-# 2. Any aliased flow table (CSV, parquet, Zeek TSV log, Argus .binetflow)
+# 2. Passively decode Modbus/TCP from a packet capture -> protocol observations
+flowprep modbus capture.pcap modbus.parquet
+# Non-standard server ports are explicit, never guessed
+flowprep modbus capture.pcap modbus.parquet --server-port 1502
+
+# 3. Any aliased flow table (CSV, parquet, Zeek TSV log, Argus .binetflow)
 #    -> the canonical schema
 flowprep canonicalize cic_export.csv flows.parquet
 flowprep canonicalize conn.log.labeled flows.parquet
 flowprep canonicalize capture.binetflow flows.parquet
 
-# 3. OCSF Network Activity events (JSON/NDJSON) -> the canonical schema
+# 4. OCSF Network Activity events (JSON/NDJSON) -> the canonical schema
 flowprep ocsf network_activity.ndjson flows.parquet
 
-# 4. nfdump/nfcapd binary flow files -> the canonical schema
+# 5. nfdump/nfcapd binary flow files -> the canonical schema
 flowprep nfcapd nfcapd.202401011200 flows.parquet
 
-# 5. Inspect any parquet file from the terminal, no Python required
+# 6. Inspect any parquet file from the terminal, no Python required
 flowprep peek flows.parquet -n 20
 ```
 
@@ -164,6 +169,28 @@ timeout and a 1h maximum duration. The reader streams pcap and pcapng,
 keeps constant memory on the packet path, and is robust to the
 slightly-out-of-order packets real captures contain.
 
+### Passive Modbus/TCP decoding
+
+`modbus` reads pcap or pcapng offline and writes a separate, versioned
+`modbus_observation/v1` table. It does not poll devices or put traffic on an OT
+network. The decoder reassembles in-order and modestly out-of-order TCP segments,
+suppresses retransmissions, splits coalesced application data units, and pairs
+requests with responses using the TCP conversation, transaction identifier, and
+unit identifier. Missing requests or responses remain explicit observations;
+protocol exceptions and parser recovery warnings are not collapsed into success.
+
+The output includes client/server endpoints, unit and function identifiers,
+read/write operation, address and quantity fields where the function defines
+them, response latency/status, and capture packet references. Read Device
+Identification responses (function 43/MEI 14) populate vendor, product, revision,
+and model fields when those objects are actually present on the wire. Device
+identity is evidence, not an inference: absent objects stay null. Coil/register
+values and raw PDUs are deliberately excluded from v1.
+
+Direction is based only on the configured server port (502 by default). Set
+`--server-port` for a known non-standard deployment; the decoder does not guess
+roles from payload content.
+
 ### Zeek logs and research exports
 
 `canonicalize` also reads **Zeek TSV logs** (`conn.log`, including labeled
@@ -196,6 +223,9 @@ convert once, train immediately.
 | `protocol` | int32 | IANA number; names auto-mapped |
 
 Plus any passthrough label columns present in the source.
+
+The Modbus protocol-observation contract is separate from canonical NetFlow and
+lives at [`schemas/modbus/v1/schema.json`](schemas/modbus/v1/schema.json).
 
 ## Example: a real research dataset
 
@@ -278,6 +308,7 @@ cargo build --release
 # end-to-end tests (python harness generates fixtures; needs dpkt + pyarrow)
 python3 -m venv .venv && .venv/bin/pip install dpkt pyarrow
 .venv/bin/python tests/test_e2e.py
+.venv/bin/python tests/test_modbus_e2e.py
 
 # throughput benchmark
 .venv/bin/python tests/bench_pcap.py

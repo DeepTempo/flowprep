@@ -1,4 +1,5 @@
 mod canonicalize;
+mod modbus;
 mod nfcapd;
 mod nfdump;
 mod ocsf;
@@ -22,6 +23,14 @@ struct Cli {
 enum Command {
     /// pcap/pcapng -> canonical flow parquet
     Pcap { input: String, output: String },
+    /// passively decode Modbus/TCP from pcap/pcapng -> protocol observations
+    Modbus {
+        input: String,
+        output: String,
+        /// TCP port used by Modbus servers in this capture
+        #[arg(long, default_value_t = 502)]
+        server_port: u16,
+    },
     /// aliased parquet/CSV flow table -> canonical parquet
     Canonicalize { input: String, output: String },
     /// OCSF Network Activity JSON/NDJSON -> canonical parquet
@@ -53,6 +62,12 @@ fn main() {
         Command::Pcap { input, output } => {
             pcap::pcap_to_parquet(input, output).map(|n| println!("Wrote {n} flows to {output}"))
         }
+        Command::Modbus {
+            input,
+            output,
+            server_port,
+        } => modbus::modbus_to_parquet(input, output, *server_port)
+            .map(|summary| println!("Wrote Modbus {summary} to {output}")),
         Command::Canonicalize { input, output } => canonicalize::canonicalize_file(input, output)
             .map(|n| println!("Wrote {n} flows to {output}")),
         Command::Ocsf { input, output } => {
