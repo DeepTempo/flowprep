@@ -4,7 +4,8 @@
 //! bounded by active-flow count). Flows are bidirectional: keys are
 //! direction-normalized so both halves of a conversation aggregate into one
 //! record, with fwd_*/bwd_* counters split by which side matches the key.
-//! Flows split on idle timeout (60s) and max duration (1h).
+//! Flows split on inactive timeout (default 15s) and active timeout
+//! (default 60s). See CONTEXT.md and docs/adr/0001-pcap-active-inactive-timeouts.md.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -18,10 +19,39 @@ use crate::writer::write_parquet;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const IDLE_TIMEOUT_USEC: i64 = 60 * 1_000_000;
-const MAX_FLOW_DURATION_USEC: i64 = 3600 * 1_000_000;
+/// Default active timeout (seconds): max age of an open flow record.
+pub const DEFAULT_ACTIVE_TIMEOUT_SECS: u64 = 60;
+/// Default inactive timeout (seconds): idle gap before closing a flow record.
+pub const DEFAULT_INACTIVE_TIMEOUT_SECS: u64 = 15;
 
 const LINKTYPE_ETHERNET: u16 = 1;
+
+/// Active/inactive timeouts for PCAP flow aggregation (microseconds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlowTimeouts {
+    pub active_usec: i64,
+    pub inactive_usec: i64,
+}
+
+impl FlowTimeouts {
+    /// Build timeouts from integer seconds. Both must be `> 0` and
+    /// `inactive_secs <= active_secs`.
+    pub fn from_secs(active_secs: u64, inactive_secs: u64) -> Result<Self> {
+        if active_secs == 0 || inactive_secs == 0 {
+            return Err("active and inactive timeouts must be > 0 seconds".into());
+        }
+        if inactive_secs > active_secs {
+            return Err(format!(
+                "inactive timeout ({inactive_secs}s) must be <= active timeout ({active_secs}s)"
+            )
+            .into());
+        }
+        Ok(Self {
+            active_usec: (active_secs as i64) * 1_000_000,
+            inactive_usec: (inactive_secs as i64) * 1_000_000,
+        })
+    }
+}
 
 struct Packet {
     timestamp: i64, // epoch microseconds
@@ -49,7 +79,7 @@ struct FlowRecord {
     state: FlowState,
 }
 
-pub fn pcap_to_parquet(input: &str, output: &str) -> Result<usize> {
+pub fn pcap_to_parquet(input: &str, output: &str, timeouts: FlowTimeouts) -> Result<usize> {
     let mut flows: Vec<FlowRecord> = Vec::new();
     let mut active: HashMap<FlowKey, FlowState> = HashMap::new();
 
@@ -74,7 +104,7 @@ pub fn pcap_to_parquet(input: &str, output: &str) -> Result<usize> {
                         };
                         let ts = b.ts_sec as i64 * 1_000_000 + frac_usec;
                         if let Some(p) = parse_packet(b.data, linktype, ts, b.origlen as i64) {
-                            ingest_packet(p, &mut active, &mut flows);
+                            ingest_packet(p, &mut active, &mut flows, timeouts);
                         }
                     }
                     PcapBlockOwned::NG(Block::InterfaceDescription(idb)) => {
@@ -85,7 +115,7 @@ pub fn pcap_to_parquet(input: &str, output: &str) -> Result<usize> {
                         // are out of spike scope.
                         let ts = ((epb.ts_high as i64) << 32) | epb.ts_low as i64;
                         if let Some(p) = parse_packet(epb.data, linktype, ts, epb.origlen as i64) {
-                            ingest_packet(p, &mut active, &mut flows);
+                            ingest_packet(p, &mut active, &mut flows, timeouts);
                         }
                     }
                     _ => {}
@@ -207,13 +237,14 @@ fn ingest_packet(
     packet: Packet,
     active: &mut HashMap<FlowKey, FlowState>,
     flows: &mut Vec<FlowRecord>,
+    timeouts: FlowTimeouts,
 ) {
     let key = make_flow_key(&packet);
     let ts = packet.timestamp;
 
     if let Some(state) = active.get(&key) {
-        if ts - state.last_timestamp > IDLE_TIMEOUT_USEC
-            || ts - state.first_timestamp > MAX_FLOW_DURATION_USEC
+        if ts - state.last_timestamp > timeouts.inactive_usec
+            || ts - state.first_timestamp > timeouts.active_usec
         {
             let state = active.remove(&key).unwrap();
             flows.push(FlowRecord {
@@ -242,5 +273,93 @@ fn ingest_packet(
     } else {
         state.bwd_bytes += packet.packet_bytes;
         state.bwd_pkts += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkt(ts_usec: i64) -> Packet {
+        Packet {
+            timestamp: ts_usec,
+            src_ip: "10.0.0.1".into(),
+            dest_ip: "10.0.0.2".into(),
+            src_port: 12345,
+            dest_port: 80,
+            protocol: PROTOCOL_TCP,
+            packet_bytes: 100,
+        }
+    }
+
+    fn aggregate(packets: Vec<Packet>, timeouts: FlowTimeouts) -> Vec<FlowRecord> {
+        let mut flows = Vec::new();
+        let mut active = HashMap::new();
+        for p in packets {
+            ingest_packet(p, &mut active, &mut flows, timeouts);
+        }
+        flows.extend(
+            active
+                .into_iter()
+                .map(|(key, state)| FlowRecord { key, state }),
+        );
+        flows.sort_by_key(|f| (f.state.first_timestamp, f.key.clone()));
+        flows
+    }
+
+    fn defaults() -> FlowTimeouts {
+        FlowTimeouts::from_secs(DEFAULT_ACTIVE_TIMEOUT_SECS, DEFAULT_INACTIVE_TIMEOUT_SECS)
+            .expect("default timeouts are valid")
+    }
+
+    #[test]
+    fn default_timeouts_are_60s_active_15s_inactive() {
+        let t = defaults();
+        assert_eq!(t.active_usec, 60 * 1_000_000);
+        assert_eq!(t.inactive_usec, 15 * 1_000_000);
+        assert_eq!(DEFAULT_ACTIVE_TIMEOUT_SECS, 60);
+        assert_eq!(DEFAULT_INACTIVE_TIMEOUT_SECS, 15);
+    }
+
+    #[test]
+    fn from_secs_rejects_zero_and_inactive_gt_active() {
+        assert!(FlowTimeouts::from_secs(0, 15).is_err());
+        assert!(FlowTimeouts::from_secs(60, 0).is_err());
+        assert!(FlowTimeouts::from_secs(15, 60).is_err());
+        assert!(FlowTimeouts::from_secs(60, 60).is_ok());
+    }
+
+    #[test]
+    fn inactive_timeout_splits_after_idle_gap() {
+        // Defaults: inactive 15s. Gap of exactly 15s must NOT split (`>`);
+        // gap of 15s + 1µs must.
+        let timeouts = defaults();
+        let no_split = aggregate(vec![pkt(0), pkt(15_000_000)], timeouts);
+        assert_eq!(no_split.len(), 1);
+        assert_eq!(no_split[0].state.fwd_pkts, 2);
+
+        let split = aggregate(vec![pkt(0), pkt(15_000_001)], timeouts);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].state.fwd_pkts, 1);
+        assert_eq!(split[1].state.fwd_pkts, 1);
+    }
+
+    #[test]
+    fn active_timeout_splits_long_continuous_flow() {
+        // Defaults: active 60s. Keep inter-packet gaps under inactive (15s)
+        // so only the active axis can fire. Age exactly 60s must NOT split;
+        // age of 60s + 1µs must.
+        let timeouts = defaults();
+        let continuous: Vec<Packet> = (0..=6).map(|i| pkt(i * 10_000_000)).collect();
+        let no_split = aggregate(continuous, timeouts);
+        assert_eq!(no_split.len(), 1);
+        assert_eq!(no_split[0].state.fwd_pkts, 7);
+
+        let mut continuous_then_over = (0..=5).map(|i| pkt(i * 10_000_000)).collect::<Vec<_>>();
+        continuous_then_over.push(pkt(60_000_001));
+        let split = aggregate(continuous_then_over, timeouts);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].state.fwd_pkts, 6);
+        assert_eq!(split[1].state.fwd_pkts, 1);
     }
 }
