@@ -5,7 +5,7 @@
 //! direction-normalized so both halves of a conversation aggregate into one
 //! record, with fwd_*/bwd_* counters split by which side matches the key.
 //! Flows split on inactive timeout (default 15s) and active timeout
-//! (default 60s). See CONTEXT.md and docs/adr/0001-pcap-active-inactive-timeouts.md.
+//! (default 60s).
 
 use std::collections::HashMap;
 use std::fs::File;
