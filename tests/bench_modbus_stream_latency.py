@@ -63,6 +63,7 @@ def main():
         elapsed_usec = (time.perf_counter_ns() - started) // 1000
         assert line, "sensor stdout closed before the expected event"
         event = json.loads(line)
+        assert event["register_values"] == [10, 20]
         if index == 0:
             first_event_usec = elapsed_usec
         if index >= warmup_records:

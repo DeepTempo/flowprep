@@ -209,7 +209,8 @@ or a file and emits `modbus_stream_event/v1` NDJSON. A `request_observed` event
 is flushed as soon as a complete Modbus request ADU is decoded; a later
 `transaction_observed` event carries the paired response, exception, orphan, or
 timeout result. Consumers do not need to wait for a PLC response before seeing
-the requested operation.
+the requested operation. Both event types carry the same requested
+`coil_values` or `register_values` as the offline observation contract.
 
 The default hot path is one synchronous decode/output loop in one long-lived
 flowprep process. It does not invoke Arrow or Parquet, create temporary files,

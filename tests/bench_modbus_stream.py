@@ -25,12 +25,30 @@ def build_capture(transaction_count):
     base = 1_750_000_000.0
     for index in range(transaction_count):
         transaction_id = index % 65536
+        address = index % 65536
         request = modbus_adu(
             transaction_id,
             1,
-            bytes([3, (index >> 8) & 0xFF, index & 0xFF, 0, 2]),
+            bytes(
+                [
+                    16,
+                    (address >> 8) & 0xFF,
+                    address & 0xFF,
+                    0,
+                    2,
+                    4,
+                    0,
+                    10,
+                    0,
+                    20,
+                ]
+            ),
         )
-        response = modbus_adu(transaction_id, 1, bytes([3, 4, 0, 10, 0, 20]))
+        response = modbus_adu(
+            transaction_id,
+            1,
+            bytes([16, (address >> 8) & 0xFF, address & 0xFF, 0, 2]),
+        )
         writer.writepkt(
             tcp_packet(
                 "10.20.0.10",

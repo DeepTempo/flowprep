@@ -154,6 +154,8 @@ def prove_incremental_emission():
     assert request["response_status"] == "pending"
     assert request["operation"] == "write"
     assert request["address"] == 100 and request["quantity"] == 2
+    assert request["register_values"] == [1, 2]
+    assert request["coil_values"] is None
     assert request["sensor_id"] == "stream-e2e"
     assert request["event_sequence"] == 3
     assert request["sensor_processing_usec"] < 50_000
@@ -171,6 +173,7 @@ def prove_incremental_emission():
     assert transaction["response_status"] == "ok"
     assert transaction["request_seen"] is True
     assert transaction["response_seen"] is True
+    assert transaction["register_values"] == [1, 2]
     assert transaction["latency_usec"] == 1000
     assert transaction["event_sequence"] == 4
     assert transaction["sensor_run_id"] == request["sensor_run_id"]
@@ -215,6 +218,7 @@ def prove_restart_safe_append():
             events = [json.loads(line) for line in handle]
         assert len(events) == 4
         assert [event["event_sequence"] for event in events] == [1, 2, 1, 2]
+        assert all(event["register_values"] == [1, 2] for event in events)
         first_run = {event["sensor_run_id"] for event in events[:2]}
         second_run = {event["sensor_run_id"] for event in events[2:]}
         assert len(first_run) == 1 and len(second_run) == 1
@@ -222,8 +226,8 @@ def prove_restart_safe_append():
 
 
 def prove_pcapng_input():
-    request = modbus_adu(77, 3, bytes([3, 0, 10, 0, 2]))
-    response = modbus_adu(77, 3, bytes([3, 4, 0, 10, 0, 20]))
+    request = modbus_adu(77, 3, bytes([15, 0, 10, 0, 10, 2, 0x55, 0x03]))
+    response = modbus_adu(77, 3, bytes([15, 0, 10, 0, 10]))
     with tempfile.TemporaryDirectory(prefix="flowprep_modbus_stream_pcapng_") as tempdir:
         capture = os.path.join(tempdir, "input.pcapng")
         with open(capture, "wb") as handle:
@@ -250,6 +254,20 @@ def prove_pcapng_input():
         ]
         assert events[1]["transaction_id"] == 77
         assert events[1]["response_status"] == "ok"
+        assert events[0]["coil_values"] == [
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            True,
+        ]
+        assert events[1]["coil_values"] == events[0]["coil_values"]
+        assert events[1]["register_values"] is None
 
 
 def main():

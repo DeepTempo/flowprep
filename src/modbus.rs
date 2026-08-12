@@ -1315,6 +1315,8 @@ struct StreamRecord<'a> {
     quantity: Option<u16>,
     write_address: Option<u16>,
     write_quantity: Option<u16>,
+    coil_values: Option<&'a [bool]>,
+    register_values: Option<&'a [u16]>,
     diagnostic_subfunction: Option<u16>,
     device_id_code: Option<u8>,
     device_id_object: Option<u8>,
@@ -1415,6 +1417,8 @@ impl<W: Write> NdjsonSink<W> {
             quantity: observation.quantity,
             write_address: observation.write_address,
             write_quantity: observation.write_quantity,
+            coil_values: observation.coil_values.as_deref(),
+            register_values: observation.register_values.as_deref(),
             diagnostic_subfunction: observation.diagnostic_subfunction,
             device_id_code: observation.device_id_code,
             device_id_object: observation.device_id_object,
@@ -2302,7 +2306,7 @@ mod tests {
         let raw = RawAdu {
             transaction_id: 1,
             unit_id: 1,
-            pdu: vec![3, 0, 0, 0, 2],
+            pdu: vec![6, 0x04, 0x01, 0, 10],
             warning: None,
         };
         let event = StreamEvent {
@@ -2328,6 +2332,9 @@ mod tests {
         assert_eq!(record["event_type"], "request_observed");
         assert_eq!(record["response_status"], "pending");
         assert_eq!(record["event_sequence"], 1);
+        assert_eq!(record["address"], 1025);
+        assert_eq!(record["register_values"], serde_json::json!([10]));
+        assert!(record["coil_values"].is_null());
     }
 
     #[test]
