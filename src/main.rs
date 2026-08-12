@@ -21,7 +21,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// pcap/pcapng -> canonical flow parquet
-    Pcap { input: String, output: String },
+    Pcap {
+        input: String,
+        output: String,
+        /// Max age of an open flow record before it is closed (seconds).
+        #[arg(long, default_value_t = pcap::DEFAULT_ACTIVE_TIMEOUT_SECS)]
+        active_timeout: u64,
+        /// Idle gap after the last packet before a flow record is closed (seconds).
+        #[arg(long, default_value_t = pcap::DEFAULT_INACTIVE_TIMEOUT_SECS)]
+        inactive_timeout: u64,
+    },
     /// aliased parquet/CSV flow table -> canonical parquet
     Canonicalize { input: String, output: String },
     /// OCSF Network Activity JSON/NDJSON -> canonical parquet
@@ -50,9 +59,16 @@ fn peek(input: &str, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Pcap { input, output } => {
-            pcap::pcap_to_parquet(input, output).map(|n| println!("Wrote {n} flows to {output}"))
-        }
+        Command::Pcap {
+            input,
+            output,
+            active_timeout,
+            inactive_timeout,
+        } => match pcap::FlowTimeouts::from_secs(*active_timeout, *inactive_timeout) {
+            Ok(timeouts) => pcap::pcap_to_parquet(input, output, timeouts)
+                .map(|n| println!("Wrote {n} flows to {output}")),
+            Err(e) => Err(e),
+        },
         Command::Canonicalize { input, output } => canonicalize::canonicalize_file(input, output)
             .map(|n| println!("Wrote {n} flows to {output}")),
         Command::Ocsf { input, output } => {

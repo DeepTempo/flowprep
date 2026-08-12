@@ -70,7 +70,9 @@ Five subcommands:
 
 ```bash
 # 1. Raw packet captures -> bidirectional flow records
+#    Defaults: --active-timeout 60 --inactive-timeout 15 (integer seconds)
 flowprep pcap capture.pcap flows.parquet
+flowprep pcap capture.pcap flows.parquet --active-timeout 60 --inactive-timeout 15
 
 # 2. Any aliased flow table (CSV, parquet, Zeek TSV log, Argus .binetflow)
 #    -> the canonical schema
@@ -159,10 +161,13 @@ flows and are reported as an error rather than a silent empty file.)
 
 Packets are grouped by a direction-normalized 5-tuple, so both halves of a
 conversation aggregate into a single flow record with separate
-forward/backward byte and packet counters. Flows split on a 60s idle
-timeout and a 1h maximum duration. The reader streams pcap and pcapng,
-keeps constant memory on the packet path, and is robust to the
-slightly-out-of-order packets real captures contain.
+forward/backward byte and packet counters. Flows split on an **inactive
+timeout** (default 15s idle gap) and an **active timeout** (default 60s max
+age), matching common NetFlow exporter practice. Both are overridable as
+integer seconds on `flowprep pcap` (`--active-timeout`,
+`--inactive-timeout`; both must be `> 0` and inactive `<=` active). The
+reader streams pcap and pcapng, keeps constant memory on the packet path,
+and is robust to the slightly-out-of-order packets real captures contain.
 
 ### Zeek logs and research exports
 
