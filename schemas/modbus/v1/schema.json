@@ -1,6 +1,6 @@
 {
   "schema_version": "modbus_observation/v1",
-  "description": "Passive Modbus/TCP request-response observations decoded from packet captures. Register and coil values are intentionally excluded from v1.",
+  "description": "Passive Modbus/TCP request-response observations decoded from packet captures. Requested write values are retained; read-response values and raw PDUs are intentionally excluded from v1.",
   "direction": {
     "basis": "configured_server_port",
     "default_server_port": 502,
@@ -23,6 +23,8 @@
     { "name": "quantity", "type": "int32", "nullable": true },
     { "name": "write_address", "type": "int32", "nullable": true, "description": "Write-side address for function 23." },
     { "name": "write_quantity", "type": "int32", "nullable": true, "description": "Write-side quantity for function 23." },
+    { "name": "coil_values", "type": "list<boolean>", "nullable": true, "description": "Requested coil values in address order for functions 5 and 15. The base is address. Null means not applicable or not decoded; presence records requested intent, not confirmed application." },
+    { "name": "register_values", "type": "list<int32>", "nullable": true, "description": "Requested unsigned 16-bit register values in address order for functions 6, 16, and 23. The base is address, except function 23 uses write_address. Null means not applicable or not decoded; presence records requested intent, not confirmed application." },
     { "name": "diagnostic_subfunction", "type": "int32", "nullable": true },
     { "name": "device_id_code", "type": "int32", "nullable": true },
     { "name": "device_id_object", "type": "int32", "nullable": true },
@@ -47,8 +49,7 @@
     { "name": "parser_warning", "type": "utf8", "nullable": true, "description": "Semicolon-delimited, machine-stable parser caveats attached to this observation." }
   ],
   "excluded_from_v1": [
-    "coil_values",
-    "register_values",
+    "read_response_values",
     "raw_pdu"
   ]
 }

@@ -10,7 +10,10 @@ use std::fs::File;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringArray};
+use arrow::array::{
+    ArrayRef, BooleanArray, BooleanBuilder, Int32Array, Int32Builder, Int64Array, ListBuilder,
+    StringArray,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
@@ -311,6 +314,8 @@ struct DecodedRequest {
     quantity: Option<u16>,
     write_address: Option<u16>,
     write_quantity: Option<u16>,
+    coil_values: Option<Vec<bool>>,
+    register_values: Option<Vec<u16>>,
     diagnostic_subfunction: Option<u16>,
     device_id_code: Option<u8>,
     device_id_object: Option<u8>,
@@ -328,6 +333,8 @@ fn decode_request(pdu: &[u8]) -> DecodedRequest {
         quantity: None,
         write_address: None,
         write_quantity: None,
+        coil_values: None,
+        register_values: None,
         diagnostic_subfunction: None,
         device_id_code: None,
         device_id_object: None,
@@ -347,22 +354,33 @@ fn decode_request(pdu: &[u8]) -> DecodedRequest {
             decoded.quantity = read_u16(pdu, 3);
             require_pdu_len(pdu, 5, &mut decoded.warning);
         }
-        5 | 6 => {
+        5 => {
             decoded.address = read_u16(pdu, 1);
             decoded.quantity = Some(1);
             require_pdu_len(pdu, 5, &mut decoded.warning);
+            decoded.coil_values = decode_single_coil_value(pdu, &mut decoded.warning);
+        }
+        6 => {
+            decoded.address = read_u16(pdu, 1);
+            decoded.quantity = Some(1);
+            require_pdu_len(pdu, 5, &mut decoded.warning);
+            decoded.register_values = read_u16(pdu, 3).map(|value| vec![value]);
         }
         8 => {
             decoded.diagnostic_subfunction = read_u16(pdu, 1);
             require_pdu_len(pdu, 3, &mut decoded.warning);
         }
-        15 | 16 => {
+        15 => {
             decoded.address = read_u16(pdu, 1);
             decoded.quantity = read_u16(pdu, 3);
-            require_pdu_len(pdu, 6, &mut decoded.warning);
-            if let Some(byte_count) = pdu.get(5) {
-                require_pdu_len(pdu, 6 + *byte_count as usize, &mut decoded.warning);
-            }
+            decoded.coil_values =
+                decode_coil_values(pdu, decoded.quantity, 5, 6, &mut decoded.warning);
+        }
+        16 => {
+            decoded.address = read_u16(pdu, 1);
+            decoded.quantity = read_u16(pdu, 3);
+            decoded.register_values =
+                decode_register_values(pdu, decoded.quantity, 5, 6, &mut decoded.warning);
         }
         22 => {
             decoded.address = read_u16(pdu, 1);
@@ -374,10 +392,8 @@ fn decode_request(pdu: &[u8]) -> DecodedRequest {
             decoded.quantity = read_u16(pdu, 3);
             decoded.write_address = read_u16(pdu, 5);
             decoded.write_quantity = read_u16(pdu, 7);
-            require_pdu_len(pdu, 10, &mut decoded.warning);
-            if let Some(byte_count) = pdu.get(9) {
-                require_pdu_len(pdu, 10 + *byte_count as usize, &mut decoded.warning);
-            }
+            decoded.register_values =
+                decode_register_values(pdu, decoded.write_quantity, 9, 10, &mut decoded.warning);
         }
         24 => {
             decoded.address = read_u16(pdu, 1);
@@ -402,6 +418,70 @@ fn require_pdu_len(pdu: &[u8], required: usize, warning: &mut Option<String>) {
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     let pair = bytes.get(offset..offset + 2)?;
     Some(u16::from_be_bytes([pair[0], pair[1]]))
+}
+
+fn decode_single_coil_value(pdu: &[u8], warning: &mut Option<String>) -> Option<Vec<bool>> {
+    match read_u16(pdu, 3)? {
+        0x0000 => Some(vec![false]),
+        0xff00 => Some(vec![true]),
+        _ => {
+            add_warning(warning, "invalid_single_coil_value");
+            None
+        }
+    }
+}
+
+fn decode_coil_values(
+    pdu: &[u8],
+    quantity: Option<u16>,
+    byte_count_offset: usize,
+    values_offset: usize,
+    warning: &mut Option<String>,
+) -> Option<Vec<bool>> {
+    require_pdu_len(pdu, values_offset, warning);
+    let quantity = quantity? as usize;
+    let byte_count = *pdu.get(byte_count_offset)? as usize;
+    let expected_byte_count = quantity.div_ceil(8);
+    if byte_count != expected_byte_count {
+        add_warning(warning, "coil_write_byte_count_mismatch");
+        return None;
+    }
+
+    let required = values_offset + byte_count;
+    require_pdu_len(pdu, required, warning);
+    let packed = pdu.get(values_offset..required)?;
+    Some(
+        (0..quantity)
+            .map(|index| packed[index / 8] & (1_u8 << (index % 8)) != 0)
+            .collect(),
+    )
+}
+
+fn decode_register_values(
+    pdu: &[u8],
+    quantity: Option<u16>,
+    byte_count_offset: usize,
+    values_offset: usize,
+    warning: &mut Option<String>,
+) -> Option<Vec<u16>> {
+    require_pdu_len(pdu, values_offset, warning);
+    let quantity = quantity? as usize;
+    let byte_count = *pdu.get(byte_count_offset)? as usize;
+    let expected_byte_count = quantity * 2;
+    if byte_count != expected_byte_count {
+        add_warning(warning, "register_write_byte_count_mismatch");
+        return None;
+    }
+
+    let required = values_offset + byte_count;
+    require_pdu_len(pdu, required, warning);
+    let encoded = pdu.get(values_offset..required)?;
+    Some(
+        encoded
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect(),
+    )
 }
 
 fn validate_response_pdu(pdu: &[u8]) -> Option<String> {
@@ -550,6 +630,8 @@ struct Observation {
     quantity: Option<u16>,
     write_address: Option<u16>,
     write_quantity: Option<u16>,
+    coil_values: Option<Vec<bool>>,
+    register_values: Option<Vec<u16>>,
     diagnostic_subfunction: Option<u16>,
     device_id_code: Option<u8>,
     device_id_object: Option<u8>,
@@ -591,6 +673,8 @@ impl Observation {
             quantity: decoded.quantity,
             write_address: decoded.write_address,
             write_quantity: decoded.write_quantity,
+            coil_values: decoded.coil_values,
+            register_values: decoded.register_values,
             diagnostic_subfunction: decoded.diagnostic_subfunction,
             device_id_code: decoded.device_id_code,
             device_id_object: decoded.device_id_object,
@@ -647,6 +731,8 @@ impl Observation {
             quantity: None,
             write_address: None,
             write_quantity: None,
+            coil_values: None,
+            register_values: None,
             diagnostic_subfunction: None,
             device_id_code: None,
             device_id_object: None,
@@ -1063,6 +1149,16 @@ fn modbus_schema() -> Arc<Schema> {
             Field::new("quantity", DataType::Int32, true),
             Field::new("write_address", DataType::Int32, true),
             Field::new("write_quantity", DataType::Int32, true),
+            Field::new(
+                "coil_values",
+                DataType::List(Arc::new(Field::new("item", DataType::Boolean, false))),
+                true,
+            ),
+            Field::new(
+                "register_values",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                true,
+            ),
             Field::new("diagnostic_subfunction", DataType::Int32, true),
             Field::new("device_id_code", DataType::Int32, true),
             Field::new("device_id_object", DataType::Int32, true),
@@ -1156,6 +1252,16 @@ fn observations_to_batch(
             observations
                 .iter()
                 .map(|observation| observation.write_quantity),
+        ),
+        optional_bool_list_array(
+            observations
+                .iter()
+                .map(|observation| observation.coil_values.as_deref()),
+        ),
+        optional_u16_list_array(
+            observations
+                .iter()
+                .map(|observation| observation.register_values.as_deref()),
         ),
         optional_u16_array(
             observations
@@ -1288,6 +1394,46 @@ fn optional_u8_array(values: impl Iterator<Item = Option<u8>>) -> ArrayRef {
     ))
 }
 
+fn optional_bool_list_array<'a>(values: impl Iterator<Item = Option<&'a [bool]>>) -> ArrayRef {
+    let mut builder = ListBuilder::new(BooleanBuilder::new()).with_field(Field::new(
+        "item",
+        DataType::Boolean,
+        false,
+    ));
+    for values in values {
+        match values {
+            Some(values) => {
+                for value in values {
+                    builder.values().append_value(*value);
+                }
+                builder.append(true);
+            }
+            None => builder.append(false),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
+fn optional_u16_list_array<'a>(values: impl Iterator<Item = Option<&'a [u16]>>) -> ArrayRef {
+    let mut builder = ListBuilder::new(Int32Builder::new()).with_field(Field::new(
+        "item",
+        DataType::Int32,
+        false,
+    ));
+    for values in values {
+        match values {
+            Some(values) => {
+                for value in values {
+                    builder.values().append_value(i32::from(*value));
+                }
+                builder.append(true);
+            }
+            None => builder.append(false),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
 fn optional_string_array<'a>(values: impl Iterator<Item = Option<&'a str>>) -> ArrayRef {
     Arc::new(StringArray::from_iter(values))
 }
@@ -1373,16 +1519,75 @@ mod tests {
         assert_eq!(read.address, Some(0x1234));
         assert_eq!(read.quantity, Some(8));
 
-        let read_write = decode_request(&[23, 0, 10, 0, 2, 0, 20, 0, 3, 6]);
+        let read_write = decode_request(&[23, 0, 10, 0, 2, 0, 20, 0, 3, 6, 0, 1, 0, 2, 0, 3]);
         assert_eq!(read_write.operation, "read_write");
         assert_eq!(read_write.address, Some(10));
         assert_eq!(read_write.write_address, Some(20));
         assert_eq!(read_write.write_quantity, Some(3));
+        assert_eq!(read_write.register_values, Some(vec![1, 2, 3]));
 
         let identity = decode_request(&[43, 14, 1, 0]);
         assert_eq!(identity.operation, "device_identification");
         assert_eq!(identity.device_id_code, Some(1));
         assert_eq!(identity.device_id_object, Some(0));
+    }
+
+    #[test]
+    fn decodes_write_values_without_treating_mask_writes_as_final_values() {
+        let single_coil_on = decode_request(&[5, 0, 7, 0xff, 0]);
+        assert_eq!(single_coil_on.coil_values, Some(vec![true]));
+
+        let single_coil_off = decode_request(&[5, 0, 7, 0, 0]);
+        assert_eq!(single_coil_off.coil_values, Some(vec![false]));
+
+        let invalid_single_coil = decode_request(&[5, 0, 7, 0x12, 0x34]);
+        assert_eq!(invalid_single_coil.coil_values, None);
+        assert_eq!(
+            invalid_single_coil.warning.as_deref(),
+            Some("invalid_single_coil_value")
+        );
+
+        let multiple_coils = decode_request(&[15, 0, 20, 0, 10, 2, 0x55, 0x03]);
+        assert_eq!(
+            multiple_coils.coil_values,
+            Some(vec![
+                true, false, true, false, true, false, true, false, true, true,
+            ])
+        );
+
+        let single_register = decode_request(&[6, 0x04, 0x01, 0, 10]);
+        assert_eq!(single_register.address, Some(1025));
+        assert_eq!(single_register.register_values, Some(vec![10]));
+
+        let multiple_registers = decode_request(&[16, 0, 30, 0, 2, 4, 0, 10, 0, 20]);
+        assert_eq!(multiple_registers.register_values, Some(vec![10, 20]));
+
+        let mask_write = decode_request(&[22, 0, 40, 0xff, 0, 0, 0xff]);
+        assert_eq!(mask_write.register_values, None);
+    }
+
+    #[test]
+    fn rejects_incomplete_or_inconsistent_write_value_lists() {
+        let truncated = decode_request(&[16, 0, 10, 0, 2, 4, 0, 1]);
+        assert_eq!(truncated.register_values, None);
+        assert_eq!(
+            truncated.warning.as_deref(),
+            Some("truncated_function_payload")
+        );
+
+        let register_mismatch = decode_request(&[16, 0, 10, 0, 2, 2, 0, 1]);
+        assert_eq!(register_mismatch.register_values, None);
+        assert_eq!(
+            register_mismatch.warning.as_deref(),
+            Some("register_write_byte_count_mismatch")
+        );
+
+        let coil_mismatch = decode_request(&[15, 0, 10, 0, 9, 1, 0xff]);
+        assert_eq!(coil_mismatch.coil_values, None);
+        assert_eq!(
+            coil_mismatch.warning.as_deref(),
+            Some("coil_write_byte_count_mismatch")
+        );
     }
 
     #[test]
@@ -1402,7 +1607,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_schema_has_version_metadata_and_no_process_values() {
+    fn batch_schema_has_version_metadata_and_requested_write_values() {
         let conversation = ConversationKey {
             client_ip: "10.0.0.1".to_string(),
             client_port: 40000,
@@ -1412,7 +1617,7 @@ mod tests {
         let raw = RawAdu {
             transaction_id: 1,
             unit_id: 1,
-            pdu: vec![3, 0, 0, 0, 2],
+            pdu: vec![6, 0x04, 0x01, 0, 10],
             warning: None,
         };
         let observation =
@@ -1427,7 +1632,15 @@ mod tests {
                 .map(String::as_str),
             Some(SCHEMA_VERSION)
         );
-        assert!(batch.schema().field_with_name("register_values").is_err());
+        assert_eq!(
+            batch
+                .schema()
+                .field_with_name("register_values")
+                .unwrap()
+                .data_type(),
+            &DataType::List(Arc::new(Field::new("item", DataType::Int32, false)))
+        );
+        assert!(batch.schema().field_with_name("raw_pdu").is_err());
     }
 
     #[test]
@@ -1446,13 +1659,19 @@ mod tests {
                 Some(arrow_field.is_nullable())
             );
             let expected_type = match json_field["type"].as_str().unwrap() {
-                "utf8" => &DataType::Utf8,
-                "int32" => &DataType::Int32,
-                "int64" => &DataType::Int64,
-                "boolean" => &DataType::Boolean,
+                "utf8" => DataType::Utf8,
+                "int32" => DataType::Int32,
+                "int64" => DataType::Int64,
+                "boolean" => DataType::Boolean,
+                "list<boolean>" => {
+                    DataType::List(Arc::new(Field::new("item", DataType::Boolean, false)))
+                }
+                "list<int32>" => {
+                    DataType::List(Arc::new(Field::new("item", DataType::Int32, false)))
+                }
                 other => panic!("unexpected declared type: {other}"),
             };
-            assert_eq!(arrow_field.data_type(), expected_type);
+            assert_eq!(arrow_field.data_type(), &expected_type);
         }
     }
 

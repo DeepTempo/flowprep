@@ -181,11 +181,18 @@ protocol exceptions and parser recovery warnings are not collapsed into success.
 
 The output includes client/server endpoints, unit and function identifiers,
 read/write operation, address and quantity fields where the function defines
-them, response latency/status, and capture packet references. Read Device
-Identification responses (function 43/MEI 14) populate vendor, product, revision,
-and model fields when those objects are actually present on the wire. Device
-identity is evidence, not an inference: absent objects stay null. Coil/register
-values and raw PDUs are deliberately excluded from v1.
+them, response latency/status, and capture packet references. Requested write
+values are retained as ordered `coil_values` for functions 5 and 15 and ordered
+`register_values` for functions 6, 16, and 23. These values record attempted
+intent; use `response_status` to distinguish acknowledged writes from exceptions
+or missing responses. Function 23 values start at `write_address`; the other
+supported writes start at `address`.
+
+Read Device Identification responses (function 43/MEI 14) populate vendor,
+product, revision, and model fields when those objects are actually present on
+the wire. Device identity is evidence, not an inference: absent objects stay
+null. Read-response process values and raw PDUs are deliberately excluded from
+v1.
 
 Direction is based only on the configured server port (502 by default). Set
 `--server-port` for a known non-standard deployment; the decoder does not guess

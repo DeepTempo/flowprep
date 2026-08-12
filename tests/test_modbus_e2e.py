@@ -93,6 +93,10 @@ def build_modbus_pcap(path):
         4, 1, bytes([16, 0, 100, 0, 2, 4, 0, 1, 0, 2])
     )
     exception_response = modbus_adu(4, 1, bytes([0x90, 2]))
+    coil_write_request = modbus_adu(
+        6, 1, bytes([15, 0, 32, 0, 10, 2, 0x55, 0x03])
+    )
+    coil_write_response = modbus_adu(6, 1, bytes([15, 0, 32, 0, 10]))
     missing_response_request = modbus_adu(5, 7, bytes([1, 0, 32, 0, 8]))
     orphan_response = modbus_adu(99, 1, bytes([3, 2, 0, 42]))
 
@@ -216,9 +220,34 @@ def build_modbus_pcap(path):
                 client_port,
                 server_port,
                 client_sequence,
-                missing_response_request,
+                coil_write_request,
             ),
             ts=base + 0.008,
+        )
+        client_sequence += len(coil_write_request)
+        writer.writepkt(
+            tcp_packet(
+                server,
+                client,
+                server_port,
+                client_port,
+                server_sequence,
+                coil_write_response,
+            ),
+            ts=base + 0.009,
+        )
+        server_sequence += len(coil_write_response)
+
+        writer.writepkt(
+            tcp_packet(
+                client,
+                server,
+                client_port,
+                server_port,
+                client_sequence,
+                missing_response_request,
+            ),
+            ts=base + 0.010,
         )
         writer.writepkt(
             tcp_packet(
@@ -229,7 +258,7 @@ def build_modbus_pcap(path):
                 server_sequence,
                 orphan_response,
             ),
-            ts=base + 0.009,
+            ts=base + 0.011,
         )
 
 
@@ -261,27 +290,30 @@ def main():
         )
         print(result.stdout.strip(), result.stderr.strip())
         assert result.returncode == 0, f"Modbus conversion failed: {result.stderr}"
-        assert "6 observations" in result.stdout
+        assert "7 observations" in result.stdout
         assert "1 retransmissions" in result.stdout
         assert "2 malformed bytes skipped" in result.stdout
 
         table = pq.read_table(output)
-        assert table.num_rows == 6
+        assert table.num_rows == 7
         assert table.schema.metadata[b"deeptempo.schema"] == b"modbus_observation/v1"
         assert table.schema.metadata[b"deeptempo.decoder"] == b"passive"
-        assert "register_values" not in table.column_names
+        assert "coil_values" in table.column_names
+        assert "register_values" in table.column_names
         assert "raw_pdu" not in table.column_names
 
         rows = {row["transaction_id"]: row for row in table.to_pylist()}
         read = rows[1]
         assert read["function_name"] == "read_holding_registers"
         assert read["address"] == 0 and read["quantity"] == 2
+        assert read["coil_values"] is None and read["register_values"] is None
         assert read["response_status"] == "ok"
         assert read["request_packet"] == 2 and read["response_packet"] == 4
         assert read["latency_usec"] == 2000
 
         write = rows[2]
         assert write["operation"] == "write" and write["address"] == 16
+        assert write["register_values"] == [123]
         assert write["response_status"] == "ok"
 
         identity = rows[3]
@@ -293,10 +325,28 @@ def main():
 
         exception = rows[4]
         assert exception["function_name"] == "write_multiple_registers"
+        assert exception["register_values"] == [1, 2]
         assert exception["response_status"] == "exception"
         assert exception["exception_code"] == 2
         assert exception["exception_name"] == "illegal_data_address"
         assert "mbap_resynchronized" in exception["parser_warning"]
+
+        coil_write = rows[6]
+        assert coil_write["function_name"] == "write_multiple_coils"
+        assert coil_write["address"] == 32 and coil_write["quantity"] == 10
+        assert coil_write["coil_values"] == [
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            True,
+        ]
+        assert coil_write["response_status"] == "ok"
 
         missing = rows[5]
         assert missing["request_seen"] is True and missing["response_seen"] is False
