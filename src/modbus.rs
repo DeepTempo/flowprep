@@ -1,4 +1,4 @@
-//! Passive Modbus/TCP decoding from offline PCAP/PCAPNG captures.
+//! Passive Modbus/TCP decoding from offline files or a continuous PCAP stream.
 //!
 //! This module deliberately writes a protocol-observation schema rather than
 //! adding application fields to canonical NetFlow. Direction is inferred only
@@ -6,9 +6,11 @@
 //! to, polls, or otherwise interacts with an OT device.
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Cursor, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{
     ArrayRef, BooleanArray, BooleanBuilder, Int32Array, Int32Builder, Int64Array, ListBuilder,
@@ -18,7 +20,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
-use pcap_parser::{Block, PcapBlockOwned, PcapError, create_reader};
+use pcap_parser::traits::PcapReaderIterator;
+use pcap_parser::{Block, LegacyPcapReader, PcapBlockOwned, PcapError, PcapNGReader};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::writer::write_parquet;
@@ -29,11 +33,19 @@ const LINKTYPE_ETHERNET: u16 = 1;
 const MAX_MODBUS_LENGTH: usize = 254; // unit identifier + PDU
 const MAX_PENDING_STREAM_BYTES: usize = 1024 * 1024;
 const SCHEMA_VERSION: &str = "modbus_observation/v1";
+const STREAM_SCHEMA_VERSION: &str = "modbus_stream_event/v1";
 const DIRECTION_BASIS: &str = "configured_server_port";
+const STREAM_SWEEP_INTERVAL_USEC: i64 = 1_000_000;
+const STREAM_IDLE_TIMEOUT_USEC: i64 = 120 * 1_000_000;
 
 const SCHEMA_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/schemas/modbus/v1/schema.json"
+));
+
+const STREAM_SCHEMA_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/schemas/modbus_stream/v1/schema.json"
 ));
 
 #[derive(Debug, Default, Clone)]
@@ -51,6 +63,31 @@ pub struct DecodeSummary {
     pub out_of_order_segments: usize,
     pub forced_stream_gaps: usize,
     pub incomplete_streams: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct StreamSummary {
+    pub decode: DecodeSummary,
+    pub stream_events: usize,
+    pub request_events: usize,
+    pub terminal_events: usize,
+    pub average_output_usec: u64,
+    pub maximum_output_usec: u64,
+}
+
+impl std::fmt::Display for StreamSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} stream events ({} immediate requests, {} terminal); average output {}us, max {}us; {}",
+            self.stream_events,
+            self.request_events,
+            self.terminal_events,
+            self.average_output_usec,
+            self.maximum_output_usec,
+            self.decode,
+        )
+    }
 }
 
 impl std::fmt::Display for DecodeSummary {
@@ -144,6 +181,7 @@ struct TcpStreamState {
     pending_segments: BTreeMap<u64, Vec<u8>>,
     decoded_bytes: Vec<u8>,
     pending_warning: Option<String>,
+    last_seen_timestamp: i64,
 }
 
 impl TcpStreamState {
@@ -752,11 +790,43 @@ impl Observation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecoderMode {
+    Batch,
+    Stream,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamEventKind {
+    RequestObserved,
+    TransactionObserved,
+}
+
+impl StreamEventKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestObserved => "request_observed",
+            Self::TransactionObserved => "transaction_observed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StreamEvent {
+    kind: StreamEventKind,
+    observation: Observation,
+}
+
 struct Decoder {
     server_port: u16,
+    mode: DecoderMode,
     streams: HashMap<StreamKey, TcpStreamState>,
     pending: HashMap<TransactionKey, Observation>,
     observations: Vec<Observation>,
+    stream_events: Vec<StreamEvent>,
+    request_timeout_usec: Option<i64>,
+    maximum_capture_timestamp: Option<i64>,
+    last_sweep_timestamp: Option<i64>,
     summary: DecodeSummary,
 }
 
@@ -764,14 +834,30 @@ impl Decoder {
     fn new(server_port: u16) -> Self {
         Self {
             server_port,
+            mode: DecoderMode::Batch,
             streams: HashMap::new(),
             pending: HashMap::new(),
             observations: Vec::new(),
+            stream_events: Vec::new(),
+            request_timeout_usec: None,
+            maximum_capture_timestamp: None,
+            last_sweep_timestamp: None,
             summary: DecodeSummary::default(),
         }
     }
 
+    fn new_streaming(server_port: u16, request_timeout_usec: i64) -> Self {
+        let mut decoder = Self::new(server_port);
+        decoder.mode = DecoderMode::Stream;
+        decoder.request_timeout_usec = Some(request_timeout_usec);
+        decoder
+    }
+
     fn ingest(&mut self, packet: TcpPayloadPacket) {
+        self.maximum_capture_timestamp = Some(
+            self.maximum_capture_timestamp
+                .map_or(packet.timestamp, |current| current.max(packet.timestamp)),
+        );
         let direction = match (
             packet.src_port == self.server_port,
             packet.dest_port == self.server_port,
@@ -812,10 +898,14 @@ impl Decoder {
 
         let payload_sequence = packet.sequence_number.wrapping_add(u32::from(packet.syn));
         let extract = if packet.payload.is_empty() {
+            if let Some(stream) = self.streams.get_mut(&stream_key) {
+                stream.last_seen_timestamp = packet.timestamp;
+            }
             ExtractReport::default()
         } else {
             self.summary.tcp_payload_packets += 1;
             let stream = self.streams.entry(stream_key.clone()).or_default();
+            stream.last_seen_timestamp = packet.timestamp;
             let feed = stream.feed(payload_sequence, &packet.payload);
             self.summary.retransmitted_segments += feed.retransmitted_segments;
             self.summary.out_of_order_segments += feed.out_of_order_segments;
@@ -854,6 +944,7 @@ impl Decoder {
                 .is_some_and(|stream| stream.has_incomplete_data());
             self.summary.incomplete_streams += usize::from(incomplete);
         }
+        self.sweep_stream_state();
     }
 
     fn handle_request(
@@ -871,12 +962,18 @@ impl Decoder {
         };
         let observation =
             Observation::from_request(conversation, &adu, decoded, timestamp, packet_number);
+        if self.mode == DecoderMode::Stream {
+            self.stream_events.push(StreamEvent {
+                kind: StreamEventKind::RequestObserved,
+                observation: observation.clone(),
+            });
+        }
         if let Some(mut replaced) = self.pending.insert(key, observation) {
             add_warning(
                 &mut replaced.parser_warning,
                 "transaction_id_reused_before_response",
             );
-            self.observations.push(replaced);
+            self.publish_terminal(replaced);
         }
     }
 
@@ -893,7 +990,7 @@ impl Decoder {
             unit_id: adu.unit_id,
         };
         let Some(mut observation) = self.pending.remove(&key) else {
-            self.observations.push(Observation::from_orphan_response(
+            self.publish_terminal(Observation::from_orphan_response(
                 conversation,
                 &adu,
                 timestamp,
@@ -957,16 +1054,93 @@ impl Decoder {
                 add_warning(&mut observation.parser_warning, &warning);
             }
         }
-        self.observations.push(observation);
+        self.publish_terminal(observation);
     }
 
-    fn finish(mut self) -> (Vec<Observation>, DecodeSummary) {
+    fn publish_terminal(&mut self, observation: Observation) {
+        self.summary.observations += 1;
+        if observation.request_seen && observation.response_seen {
+            self.summary.complete += 1;
+        } else if observation.request_seen {
+            self.summary.request_only += 1;
+        } else if observation.response_seen {
+            self.summary.response_only += 1;
+        }
+        if observation.response_status == "exception" {
+            self.summary.exceptions += 1;
+        }
+
+        match self.mode {
+            DecoderMode::Batch => self.observations.push(observation),
+            DecoderMode::Stream => self.stream_events.push(StreamEvent {
+                kind: StreamEventKind::TransactionObserved,
+                observation,
+            }),
+        }
+    }
+
+    fn sweep_stream_state(&mut self) {
+        let (Some(timeout), Some(watermark)) =
+            (self.request_timeout_usec, self.maximum_capture_timestamp)
+        else {
+            return;
+        };
+        if self
+            .last_sweep_timestamp
+            .is_some_and(|previous| watermark.saturating_sub(previous) < STREAM_SWEEP_INTERVAL_USEC)
+        {
+            return;
+        }
+        self.last_sweep_timestamp = Some(watermark);
+
+        let request_cutoff = watermark.saturating_sub(timeout);
+        let expired_keys: Vec<TransactionKey> = self
+            .pending
+            .iter()
+            .filter(|(_, observation)| {
+                observation
+                    .request_timestamp
+                    .is_some_and(|timestamp| timestamp <= request_cutoff)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired_keys {
+            if let Some(mut observation) = self.pending.remove(&key) {
+                add_warning(&mut observation.parser_warning, "request_timeout");
+                self.publish_terminal(observation);
+            }
+        }
+
+        let stream_cutoff = watermark.saturating_sub(STREAM_IDLE_TIMEOUT_USEC);
+        let mut incomplete_streams = 0;
+        self.streams.retain(|_, stream| {
+            let keep = stream.last_seen_timestamp > stream_cutoff;
+            if !keep && stream.has_incomplete_data() {
+                incomplete_streams += 1;
+            }
+            keep
+        });
+        self.summary.incomplete_streams += incomplete_streams;
+    }
+
+    fn take_stream_events(&mut self) -> Vec<StreamEvent> {
+        std::mem::take(&mut self.stream_events)
+    }
+
+    fn finalize(&mut self) {
         self.summary.incomplete_streams += self
             .streams
             .values()
             .filter(|stream| stream.has_incomplete_data())
             .count();
-        self.observations.extend(self.pending.into_values());
+        let pending = std::mem::take(&mut self.pending);
+        for observation in pending.into_values() {
+            self.publish_terminal(observation);
+        }
+    }
+
+    fn finish(mut self) -> (Vec<Observation>, DecodeSummary) {
+        self.finalize();
         self.observations.sort_by_key(|observation| {
             (
                 observation.timestamp,
@@ -975,29 +1149,12 @@ impl Decoder {
                 observation.unit_id,
             )
         });
-
-        self.summary.observations = self.observations.len();
-        self.summary.complete = self
-            .observations
-            .iter()
-            .filter(|observation| observation.request_seen && observation.response_seen)
-            .count();
-        self.summary.request_only = self
-            .observations
-            .iter()
-            .filter(|observation| observation.request_seen && !observation.response_seen)
-            .count();
-        self.summary.response_only = self
-            .observations
-            .iter()
-            .filter(|observation| !observation.request_seen && observation.response_seen)
-            .count();
-        self.summary.exceptions = self
-            .observations
-            .iter()
-            .filter(|observation| observation.response_status == "exception")
-            .count();
         (self.observations, self.summary)
+    }
+
+    fn finish_stream(mut self) -> (Vec<StreamEvent>, DecodeSummary) {
+        self.finalize();
+        (self.stream_events, self.summary)
     }
 }
 
@@ -1007,8 +1164,28 @@ pub fn modbus_to_parquet(input: &str, output: &str, server_port: u16) -> Result<
     }
 
     let file = File::open(input)?;
-    let mut reader = create_reader(1 << 20, file)?;
     let mut decoder = Decoder::new(server_port);
+    decode_capture(file, &mut decoder, |_, _| Ok(()))?;
+    let (observations, summary) = decoder.finish();
+    if observations.is_empty() {
+        return Err(format!(
+            "no decodable Modbus/TCP observations found on server port {server_port} \
+             ({} payload packets, {} malformed bytes, {} incomplete streams)",
+            summary.tcp_payload_packets, summary.malformed_bytes, summary.incomplete_streams,
+        )
+        .into());
+    }
+    let batch = observations_to_batch(&observations)?;
+    write_parquet(&batch, output)?;
+    Ok(summary)
+}
+
+fn decode_capture<R, F>(input: R, decoder: &mut Decoder, mut after_packet: F) -> Result<()>
+where
+    R: Read + Send,
+    F: FnMut(&mut Decoder, Instant) -> Result<()>,
+{
+    let mut reader = create_incremental_reader(input)?;
     let mut linktype = LINKTYPE_ETHERNET;
     let mut legacy_nanos = false;
     let mut packet_number = 0_i64;
@@ -1023,6 +1200,7 @@ pub fn modbus_to_parquet(input: &str, output: &str, server_port: u16) -> Result<
                     }
                     PcapBlockOwned::Legacy(packet) => {
                         packet_number += 1;
+                        let processing_started = Instant::now();
                         let fractional_usec = if legacy_nanos {
                             (packet.ts_usec / 1000) as i64
                         } else {
@@ -1033,6 +1211,7 @@ pub fn modbus_to_parquet(input: &str, output: &str, server_port: u16) -> Result<
                             parse_tcp_payload(packet.data, linktype, timestamp, packet_number)
                         {
                             decoder.ingest(packet);
+                            after_packet(decoder, processing_started)?;
                         }
                     }
                     PcapBlockOwned::NG(Block::InterfaceDescription(description)) => {
@@ -1040,6 +1219,7 @@ pub fn modbus_to_parquet(input: &str, output: &str, server_port: u16) -> Result<
                     }
                     PcapBlockOwned::NG(Block::EnhancedPacket(packet)) => {
                         packet_number += 1;
+                        let processing_started = Instant::now();
                         // pcapng's default if_tsresol is microseconds, matching
                         // the existing flow reader. Interface-specific options
                         // are intentionally left for a later capture-layer pass.
@@ -1048,6 +1228,7 @@ pub fn modbus_to_parquet(input: &str, output: &str, server_port: u16) -> Result<
                             parse_tcp_payload(packet.data, linktype, timestamp, packet_number)
                         {
                             decoder.ingest(packet);
+                            after_packet(decoder, processing_started)?;
                         }
                     }
                     _ => {}
@@ -1063,19 +1244,312 @@ pub fn modbus_to_parquet(input: &str, output: &str, server_port: u16) -> Result<
             Err(error) => return Err(format!("pcap parse error: {error:?}").into()),
         }
     }
+    Ok(())
+}
 
-    let (observations, summary) = decoder.finish();
-    if observations.is_empty() {
-        return Err(format!(
-            "no decodable Modbus/TCP observations found on server port {server_port} \
-             ({} payload packets, {} malformed bytes, {} incomplete streams)",
-            summary.tcp_payload_packets, summary.malformed_bytes, summary.incomplete_streams,
-        )
-        .into());
+fn create_incremental_reader<'a, R>(mut input: R) -> Result<Box<dyn PcapReaderIterator + Send + 'a>>
+where
+    R: Read + Send + 'a,
+{
+    const PCAPNG_MAGIC: [u8; 4] = [0x0a, 0x0d, 0x0d, 0x0a];
+    const PCAP_MAGICS: [[u8; 4]; 4] = [
+        [0xd4, 0xc3, 0xb2, 0xa1],
+        [0xa1, 0xb2, 0xc3, 0xd4],
+        [0x4d, 0x3c, 0xb2, 0xa1],
+        [0xa1, 0xb2, 0x3c, 0x4d],
+    ];
+
+    let mut first = [0_u8; 12];
+    input.read_exact(&mut first[..4])?;
+    if PCAP_MAGICS.contains(&first[..4].try_into().unwrap()) {
+        let mut header = vec![0_u8; 24];
+        header[..4].copy_from_slice(&first[..4]);
+        input.read_exact(&mut header[4..])?;
+        let replay = Cursor::new(header).chain(input);
+        return Ok(Box::new(LegacyPcapReader::new(1 << 20, replay)?));
     }
-    let batch = observations_to_batch(&observations)?;
-    write_parquet(&batch, output)?;
-    Ok(summary)
+    if first[..4] != PCAPNG_MAGIC {
+        return Err("capture header is neither PCAP nor PCAPNG".into());
+    }
+
+    input.read_exact(&mut first[4..12])?;
+    let byte_order_magic = &first[8..12];
+    let total_length = if byte_order_magic == [0x4d, 0x3c, 0x2b, 0x1a] {
+        u32::from_le_bytes(first[4..8].try_into().unwrap()) as usize
+    } else if byte_order_magic == [0x1a, 0x2b, 0x3c, 0x4d] {
+        u32::from_be_bytes(first[4..8].try_into().unwrap()) as usize
+    } else {
+        return Err("pcapng section header has an invalid byte-order magic".into());
+    };
+    if !(28..=(1 << 20)).contains(&total_length) {
+        return Err(format!("pcapng section header length {total_length} is invalid").into());
+    }
+    let mut header = vec![0_u8; total_length];
+    header[..12].copy_from_slice(&first);
+    input.read_exact(&mut header[12..])?;
+    let replay = Cursor::new(header).chain(input);
+    Ok(Box::new(PcapNGReader::new(1 << 20, replay)?))
+}
+
+#[derive(Serialize)]
+struct StreamRecord<'a> {
+    schema_version: &'static str,
+    observation_schema_version: &'static str,
+    event_type: &'static str,
+    sensor_id: &'a str,
+    sensor_run_id: &'a str,
+    event_sequence: u64,
+    emitted_at_usec: i64,
+    sensor_processing_usec: u64,
+    timestamp: i64,
+    client_ip: &'a str,
+    client_port: u16,
+    server_ip: &'a str,
+    server_port: u16,
+    transaction_id: u16,
+    unit_id: u8,
+    function_code: u8,
+    function_name: &'a str,
+    operation: &'a str,
+    address: Option<u16>,
+    quantity: Option<u16>,
+    write_address: Option<u16>,
+    write_quantity: Option<u16>,
+    coil_values: Option<&'a [bool]>,
+    register_values: Option<&'a [u16]>,
+    diagnostic_subfunction: Option<u16>,
+    device_id_code: Option<u8>,
+    device_id_object: Option<u8>,
+    request_seen: bool,
+    response_seen: bool,
+    request_timestamp: Option<i64>,
+    response_timestamp: Option<i64>,
+    latency_usec: Option<i64>,
+    response_status: &'a str,
+    exception_code: Option<u8>,
+    exception_name: Option<&'a str>,
+    vendor_name: Option<&'a str>,
+    product_code: Option<&'a str>,
+    revision: Option<&'a str>,
+    vendor_url: Option<&'a str>,
+    product_name: Option<&'a str>,
+    model_name: Option<&'a str>,
+    user_application_name: Option<&'a str>,
+    request_packet: Option<i64>,
+    response_packet: Option<i64>,
+    direction_basis: &'static str,
+    parser_warning: Option<&'a str>,
+}
+
+struct NdjsonSink<W: Write> {
+    writer: BufWriter<W>,
+    sensor_id: String,
+    sensor_run_id: String,
+    event_sequence: u64,
+    flush_every: usize,
+    since_flush: usize,
+    request_events: usize,
+    terminal_events: usize,
+    total_output_usec: u128,
+    maximum_output_usec: u64,
+}
+
+impl<W: Write> NdjsonSink<W> {
+    fn new(output: W, sensor_id: &str, flush_every: usize) -> Result<Self> {
+        if sensor_id.trim().is_empty() {
+            return Err("sensor ID must not be empty".into());
+        }
+        if flush_every == 0 {
+            return Err("flush-every must be at least 1".into());
+        }
+        let spec: Value =
+            serde_json::from_str(STREAM_SCHEMA_JSON).expect("embedded stream schema is valid");
+        assert_eq!(spec["schema_version"].as_str(), Some(STREAM_SCHEMA_VERSION));
+        let started_at = epoch_microseconds()?;
+        Ok(Self {
+            writer: BufWriter::with_capacity(16 * 1024, output),
+            sensor_id: sensor_id.to_string(),
+            sensor_run_id: format!("{sensor_id}-{}-{started_at}", std::process::id()),
+            event_sequence: 0,
+            flush_every,
+            since_flush: 0,
+            request_events: 0,
+            terminal_events: 0,
+            total_output_usec: 0,
+            maximum_output_usec: 0,
+        })
+    }
+
+    fn write_event(&mut self, event: &StreamEvent, processing_started: Instant) -> Result<()> {
+        let output_started = Instant::now();
+        self.event_sequence += 1;
+        match event.kind {
+            StreamEventKind::RequestObserved => self.request_events += 1,
+            StreamEventKind::TransactionObserved => self.terminal_events += 1,
+        }
+
+        let observation = &event.observation;
+        let response_status = if event.kind == StreamEventKind::RequestObserved {
+            "pending"
+        } else {
+            observation.response_status.as_str()
+        };
+        let record = StreamRecord {
+            schema_version: STREAM_SCHEMA_VERSION,
+            observation_schema_version: SCHEMA_VERSION,
+            event_type: event.kind.as_str(),
+            sensor_id: &self.sensor_id,
+            sensor_run_id: &self.sensor_run_id,
+            event_sequence: self.event_sequence,
+            emitted_at_usec: epoch_microseconds()?,
+            sensor_processing_usec: elapsed_microseconds(processing_started),
+            timestamp: observation.timestamp,
+            client_ip: &observation.conversation.client_ip,
+            client_port: observation.conversation.client_port,
+            server_ip: &observation.conversation.server_ip,
+            server_port: observation.conversation.server_port,
+            transaction_id: observation.transaction_id,
+            unit_id: observation.unit_id,
+            function_code: observation.function_code,
+            function_name: &observation.function_name,
+            operation: &observation.operation,
+            address: observation.address,
+            quantity: observation.quantity,
+            write_address: observation.write_address,
+            write_quantity: observation.write_quantity,
+            coil_values: observation.coil_values.as_deref(),
+            register_values: observation.register_values.as_deref(),
+            diagnostic_subfunction: observation.diagnostic_subfunction,
+            device_id_code: observation.device_id_code,
+            device_id_object: observation.device_id_object,
+            request_seen: observation.request_seen,
+            response_seen: observation.response_seen,
+            request_timestamp: observation.request_timestamp,
+            response_timestamp: observation.response_timestamp,
+            latency_usec: observation.latency_usec,
+            response_status,
+            exception_code: observation.exception_code,
+            exception_name: observation.exception_name.as_deref(),
+            vendor_name: observation.identity.vendor_name.as_deref(),
+            product_code: observation.identity.product_code.as_deref(),
+            revision: observation.identity.revision.as_deref(),
+            vendor_url: observation.identity.vendor_url.as_deref(),
+            product_name: observation.identity.product_name.as_deref(),
+            model_name: observation.identity.model_name.as_deref(),
+            user_application_name: observation.identity.user_application_name.as_deref(),
+            request_packet: observation.request_packet,
+            response_packet: observation.response_packet,
+            direction_basis: DIRECTION_BASIS,
+            parser_warning: observation.parser_warning.as_deref(),
+        };
+        serde_json::to_writer(&mut self.writer, &record)?;
+        self.writer.write_all(b"\n")?;
+        self.since_flush += 1;
+        if self.since_flush >= self.flush_every {
+            self.writer.flush()?;
+            self.since_flush = 0;
+        }
+
+        let output_usec = elapsed_microseconds(output_started);
+        self.total_output_usec += u128::from(output_usec);
+        self.maximum_output_usec = self.maximum_output_usec.max(output_usec);
+        Ok(())
+    }
+
+    fn finish(mut self, decode: DecodeSummary) -> Result<StreamSummary> {
+        self.writer.flush()?;
+        let stream_events = self.request_events + self.terminal_events;
+        let average_output_usec = if stream_events == 0 {
+            0
+        } else {
+            (self.total_output_usec / stream_events as u128) as u64
+        };
+        Ok(StreamSummary {
+            decode,
+            stream_events,
+            request_events: self.request_events,
+            terminal_events: self.terminal_events,
+            average_output_usec,
+            maximum_output_usec: self.maximum_output_usec,
+        })
+    }
+}
+
+fn elapsed_microseconds(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn epoch_microseconds() -> Result<i64> {
+    let micros = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
+    i64::try_from(micros).map_err(|_| "system timestamp exceeds int64 microseconds".into())
+}
+
+pub fn modbus_stream_to_ndjson(
+    input: &str,
+    output: &str,
+    server_port: u16,
+    sensor_id: &str,
+    request_timeout_ms: u64,
+    flush_every: usize,
+) -> Result<StreamSummary> {
+    if server_port == 0 {
+        return Err("Modbus server port must be between 1 and 65535".into());
+    }
+    if request_timeout_ms == 0 {
+        return Err("request timeout must be at least 1 millisecond".into());
+    }
+    let timeout_usec = request_timeout_ms
+        .checked_mul(1000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or("request timeout is too large")?;
+
+    let input: Box<dyn Read + Send> = if input == "-" {
+        Box::new(std::io::stdin())
+    } else {
+        Box::new(File::open(input)?)
+    };
+    let output: Box<dyn Write> = if output == "-" {
+        Box::new(std::io::stdout())
+    } else {
+        Box::new(OpenOptions::new().create(true).append(true).open(output)?)
+    };
+    stream_reader_to_writer(
+        input,
+        output,
+        server_port,
+        sensor_id,
+        timeout_usec,
+        flush_every,
+    )
+}
+
+fn stream_reader_to_writer<R, W>(
+    input: R,
+    output: W,
+    server_port: u16,
+    sensor_id: &str,
+    request_timeout_usec: i64,
+    flush_every: usize,
+) -> Result<StreamSummary>
+where
+    R: Read + Send,
+    W: Write,
+{
+    let mut decoder = Decoder::new_streaming(server_port, request_timeout_usec);
+    let mut sink = NdjsonSink::new(output, sensor_id, flush_every)?;
+    decode_capture(input, &mut decoder, |decoder, processing_started| {
+        for event in decoder.take_stream_events() {
+            sink.write_event(&event, processing_started)?;
+        }
+        Ok(())
+    })?;
+
+    let (events, decode) = decoder.finish_stream();
+    let finalization_started = Instant::now();
+    for event in events {
+        sink.write_event(&event, finalization_started)?;
+    }
+    sink.finish(decode)
 }
 
 fn parse_tcp_payload(
@@ -1467,6 +1941,44 @@ mod tests {
         bytes
     }
 
+    fn tcp_payload_packet(
+        timestamp: i64,
+        packet_number: i64,
+        request_direction: bool,
+        client_port: u16,
+        sequence_number: u32,
+        payload: Vec<u8>,
+    ) -> TcpPayloadPacket {
+        let (src_ip, dest_ip, src_port, dest_port) = if request_direction {
+            (
+                "10.0.0.1".to_string(),
+                "10.0.0.2".to_string(),
+                client_port,
+                502,
+            )
+        } else {
+            (
+                "10.0.0.2".to_string(),
+                "10.0.0.1".to_string(),
+                502,
+                client_port,
+            )
+        };
+        TcpPayloadPacket {
+            timestamp,
+            packet_number,
+            src_ip,
+            dest_ip,
+            src_port,
+            dest_port,
+            sequence_number,
+            syn: false,
+            fin: false,
+            rst: false,
+            payload,
+        }
+    }
+
     #[test]
     fn reassembles_fragmented_and_coalesced_adus() {
         let first = adu(1, 7, &[3, 0, 10, 0, 2]);
@@ -1711,5 +2223,124 @@ mod tests {
             validate_response_pdu(&[3, 4, 0, 1]).as_deref(),
             Some("truncated_function_payload")
         );
+    }
+
+    #[test]
+    fn streaming_emits_request_before_the_response() {
+        let mut decoder = Decoder::new_streaming(502, 5_000_000);
+        decoder.ingest(tcp_payload_packet(
+            1_000_000,
+            1,
+            true,
+            40000,
+            1000,
+            adu(7, 1, &[16, 0, 100, 0, 2, 4, 0, 1, 0, 2]),
+        ));
+        let request_events = decoder.take_stream_events();
+        assert_eq!(request_events.len(), 1);
+        assert_eq!(request_events[0].kind, StreamEventKind::RequestObserved);
+        assert_eq!(request_events[0].observation.operation, "write");
+        assert!(!request_events[0].observation.response_seen);
+
+        decoder.ingest(tcp_payload_packet(
+            1_001_000,
+            2,
+            false,
+            40000,
+            5000,
+            adu(7, 1, &[16, 0, 100, 0, 2]),
+        ));
+        let terminal_events = decoder.take_stream_events();
+        assert_eq!(terminal_events.len(), 1);
+        assert_eq!(
+            terminal_events[0].kind,
+            StreamEventKind::TransactionObserved
+        );
+        assert_eq!(terminal_events[0].observation.response_status, "ok");
+        assert_eq!(terminal_events[0].observation.latency_usec, Some(1000));
+    }
+
+    #[test]
+    fn streaming_timeout_bounds_unmatched_request_state() {
+        let mut decoder = Decoder::new_streaming(502, 5_000_000);
+        decoder.ingest(tcp_payload_packet(
+            0,
+            1,
+            true,
+            40000,
+            1000,
+            adu(1, 1, &[3, 0, 0, 0, 1]),
+        ));
+        decoder.take_stream_events();
+
+        decoder.ingest(tcp_payload_packet(
+            6_000_000,
+            2,
+            true,
+            40001,
+            2000,
+            adu(2, 1, &[3, 0, 1, 0, 1]),
+        ));
+        let events = decoder.take_stream_events();
+        let timeout = events
+            .iter()
+            .find(|event| event.observation.transaction_id == 1)
+            .expect("the old request is emitted as terminal");
+        assert_eq!(timeout.kind, StreamEventKind::TransactionObserved);
+        assert_eq!(timeout.observation.response_status, "missing_response");
+        assert_eq!(
+            timeout.observation.parser_warning.as_deref(),
+            Some("request_timeout")
+        );
+        assert_eq!(decoder.pending.len(), 1);
+    }
+
+    #[test]
+    fn stream_json_has_provenance_and_pending_semantics() {
+        let conversation = ConversationKey {
+            client_ip: "10.0.0.1".to_string(),
+            client_port: 40000,
+            server_ip: "10.0.0.2".to_string(),
+            server_port: 502,
+        };
+        let raw = RawAdu {
+            transaction_id: 1,
+            unit_id: 1,
+            pdu: vec![6, 0x04, 0x01, 0, 10],
+            warning: None,
+        };
+        let event = StreamEvent {
+            kind: StreamEventKind::RequestObserved,
+            observation: Observation::from_request(
+                conversation,
+                &raw,
+                decode_request(&raw.pdu),
+                1,
+                2,
+            ),
+        };
+        let mut output = Vec::new();
+        let summary = {
+            let mut sink = NdjsonSink::new(&mut output, "unit-test-sensor", 1).unwrap();
+            sink.write_event(&event, Instant::now()).unwrap();
+            sink.finish(DecodeSummary::default()).unwrap()
+        };
+        assert_eq!(summary.request_events, 1);
+        let record: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(record["schema_version"], STREAM_SCHEMA_VERSION);
+        assert_eq!(record["sensor_id"], "unit-test-sensor");
+        assert_eq!(record["event_type"], "request_observed");
+        assert_eq!(record["response_status"], "pending");
+        assert_eq!(record["event_sequence"], 1);
+        assert_eq!(record["address"], 1025);
+        assert_eq!(record["register_values"], serde_json::json!([10]));
+        assert!(record["coil_values"].is_null());
+    }
+
+    #[test]
+    fn embedded_stream_schema_declares_the_runtime_version() {
+        let spec: Value = serde_json::from_str(STREAM_SCHEMA_JSON).unwrap();
+        assert_eq!(spec["schema_version"], STREAM_SCHEMA_VERSION);
+        assert_eq!(spec["hot_path"]["default_flush_every"], 1);
     }
 }

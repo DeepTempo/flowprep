@@ -1,0 +1,69 @@
+{
+  "schema_version": "modbus_stream_event/v1",
+  "description": "Low-latency NDJSON envelope for passive Modbus/TCP sensor events. The observation fields are defined by modbus_observation/v1.",
+  "transport": "newline-delimited JSON",
+  "observation_schema": "../../modbus/v1/schema.json",
+  "event_types": {
+    "request_observed": "Emitted as soon as a complete request ADU is decoded. response_status is pending.",
+    "transaction_observed": "Emitted when a response is paired, an orphan response is observed, a request times out, a transaction ID is reused, or the input stream ends."
+  },
+  "envelope_fields": [
+    {
+      "name": "schema_version",
+      "type": "utf8",
+      "nullable": false
+    },
+    {
+      "name": "observation_schema_version",
+      "type": "utf8",
+      "nullable": false
+    },
+    {
+      "name": "event_type",
+      "type": "utf8",
+      "nullable": false
+    },
+    {
+      "name": "sensor_id",
+      "type": "utf8",
+      "nullable": false
+    },
+    {
+      "name": "sensor_run_id",
+      "type": "utf8",
+      "nullable": false,
+      "description": "Changes on every process start; combine with event_sequence for run-local uniqueness."
+    },
+    {
+      "name": "event_sequence",
+      "type": "uint64",
+      "nullable": false
+    },
+    {
+      "name": "emitted_at_usec",
+      "type": "int64",
+      "nullable": false
+    },
+    {
+      "name": "sensor_processing_usec",
+      "type": "uint64",
+      "nullable": false,
+      "description": "Elapsed time from availability of the containing PCAP packet block through parsing and event construction, measured before NDJSON serialization."
+    }
+  ],
+  "hot_path": {
+    "process_model": "single long-lived process",
+    "queueing": "none; output applies synchronous bounded backpressure",
+    "default_flush_every": 1,
+    "request_emission": "before response pairing",
+    "excluded": [
+      "Arrow",
+      "Parquet",
+      "temporary files",
+      "polling",
+      "async runtime",
+      "worker pool",
+      "child process spawning"
+    ]
+  }
+}

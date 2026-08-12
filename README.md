@@ -5,7 +5,7 @@
 <h1 align="center">flowprep</h1>
 
 <p align="center">
-  <strong>Network telemetry → ML-ready canonical NetFlow parquet.</strong>
+  <strong>Network telemetry → ML-ready flow and protocol observations.</strong>
 </p>
 
 <p align="center">
@@ -17,9 +17,8 @@
 ---
 
 flowprep converts the network telemetry you actually have — packet captures,
-flow CSVs, vendor exports — into a single, clean, typed, unit-normalized
-parquet table that you can hand directly to a model, a notebook, or a data
-pipeline.
+flow CSVs, vendor exports — into clean, typed, versioned observations that you
+can hand directly to a model, a notebook, or a data pipeline.
 
 It is built and maintained by [DeepTempo](https://deeptempo.ai), where it is
 used in production as the ingestion front door for our **LogLM**: flow
@@ -66,7 +65,7 @@ cargo build --release
 ./demo.sh
 ```
 
-Six subcommands:
+Seven subcommands:
 
 ```bash
 # 1. Raw packet captures -> bidirectional flow records
@@ -77,19 +76,23 @@ flowprep modbus capture.pcap modbus.parquet
 # Non-standard server ports are explicit, never guessed
 flowprep modbus capture.pcap modbus.parquet --server-port 1502
 
-# 3. Any aliased flow table (CSV, parquet, Zeek TSV log, Argus .binetflow)
+# 3. Continuously decode a packet-capture stream -> immediate NDJSON events
+tcpdump -U -i <SPAN_INTERFACE> -w - 'tcp port 502' \
+  | flowprep modbus-stream --sensor-id plant-a --output modbus.ndjson
+
+# 4. Any aliased flow table (CSV, parquet, Zeek TSV log, Argus .binetflow)
 #    -> the canonical schema
 flowprep canonicalize cic_export.csv flows.parquet
 flowprep canonicalize conn.log.labeled flows.parquet
 flowprep canonicalize capture.binetflow flows.parquet
 
-# 4. OCSF Network Activity events (JSON/NDJSON) -> the canonical schema
+# 5. OCSF Network Activity events (JSON/NDJSON) -> the canonical schema
 flowprep ocsf network_activity.ndjson flows.parquet
 
-# 5. nfdump/nfcapd binary flow files -> the canonical schema
+# 6. nfdump/nfcapd binary flow files -> the canonical schema
 flowprep nfcapd nfcapd.202401011200 flows.parquet
 
-# 6. Inspect any parquet file from the terminal, no Python required
+# 7. Inspect any parquet file from the terminal, no Python required
 flowprep peek flows.parquet -n 20
 ```
 
@@ -198,6 +201,39 @@ Direction is based only on the configured server port (502 by default). Set
 `--server-port` for a known non-standard deployment; the decoder does not guess
 roles from payload content.
 
+### Lightweight continuous Modbus sensor
+
+`modbus-stream` is the long-running counterpart to the offline `modbus`
+command. It consumes a continuous PCAP/PCAPNG byte stream from stdin, a FIFO,
+or a file and emits `modbus_stream_event/v1` NDJSON. A `request_observed` event
+is flushed as soon as a complete Modbus request ADU is decoded; a later
+`transaction_observed` event carries the paired response, exception, orphan, or
+timeout result. Consumers do not need to wait for a PLC response before seeing
+the requested operation. Both event types carry the same requested
+`coil_values` or `register_values` as the offline observation contract.
+
+The default hot path is one synchronous decode/output loop in one long-lived
+flowprep process. It does not invoke Arrow or Parquet, create temporary files,
+poll devices, start an async runtime or worker pool, or spawn child processes.
+`--flush-every 1` is the latency-first default. A larger value can improve bulk
+throughput, but delays sparse events and should only be selected deliberately.
+
+Output is synchronously backpressured instead of being placed on an unbounded
+in-process queue. That bounds sensor memory, but a deployment must give the
+capture producer a bounded ring buffer or explicit drop policy if its downstream
+consumer can stall. `sensor_run_id` changes on restart, while `event_sequence`
+is monotonic within a run, so append-mode files can be consumed without treating
+restarted sequence numbers as duplicates.
+
+This MVP accepts capture bytes; it does not open the capture interface itself.
+It can consume an existing sensor's PCAP stream without another DeepTempo
+process, or be paired with a packet-buffered producer such as `tcpdump -U`.
+It does not yet invoke LogLM or include end-to-end model inference in its latency
+measurement. Request timeouts advance on capture timestamps when traffic arrives
+(and all pending requests are finalized at EOF), so an otherwise idle blocking
+stream can delay the terminal timeout event; the immediate request event is not
+delayed.
+
 ### Zeek logs and research exports
 
 `canonicalize` also reads **Zeek TSV logs** (`conn.log`, including labeled
@@ -233,6 +269,8 @@ Plus any passthrough label columns present in the source.
 
 The Modbus protocol-observation contract is separate from canonical NetFlow and
 lives at [`schemas/modbus/v1/schema.json`](schemas/modbus/v1/schema.json).
+The continuous NDJSON envelope is versioned separately at
+[`schemas/modbus_stream/v1/schema.json`](schemas/modbus_stream/v1/schema.json).
 
 ## Example: a real research dataset
 
@@ -316,9 +354,12 @@ cargo build --release
 python3 -m venv .venv && .venv/bin/pip install dpkt pyarrow
 .venv/bin/python tests/test_e2e.py
 .venv/bin/python tests/test_modbus_e2e.py
+.venv/bin/python tests/test_modbus_stream_e2e.py
 
-# throughput benchmark
+# throughput benchmarks
 .venv/bin/python tests/bench_pcap.py
+.venv/bin/python tests/bench_modbus_stream.py
+.venv/bin/python tests/bench_modbus_stream_latency.py
 ```
 
 ## Release
