@@ -244,6 +244,7 @@ def main():
     tcp = [r for r in t.to_pylist() if r["protocol"] == 6][0]
     assert tcp["fwd_pkts"] == 3 and tcp["bwd_pkts"] == 2, "direction split wrong"
     assert tcp["flow_dur"] == 2.0, f"flow_dur wrong: {tcp['flow_dur']}"
+    assert tcp["first_packet"] == 1 and tcp["last_packet"] == 5, "pcap packet provenance wrong"
 
     r = subprocess.run(
         [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_test.csv", "/tmp/flowprep_csv.parquet"],

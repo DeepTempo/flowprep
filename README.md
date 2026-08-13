@@ -169,6 +169,12 @@ integer seconds on `flowprep pcap` (`--active-timeout`,
 reader streams pcap and pcapng, keeps constant memory on the packet path,
 and is robust to the slightly-out-of-order packets real captures contain.
 
+PCAP-derived flow rows also carry `first_packet` and `last_packet`: 1-based,
+capture-local packet ordinals bounding the packets assigned to that flow.
+Downstream custody code can bind those ordinals to a capture ID and SHA-256 and
+join packet-referenced protocol observations without retaining payload bytes in
+the flow table. These fields are provenance, not proof of network topology.
+
 ### Zeek logs and research exports
 
 `canonicalize` also reads **Zeek TSV logs** (`conn.log`, including labeled
