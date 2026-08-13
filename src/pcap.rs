@@ -10,7 +10,11 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 
+use arrow::array::Int64Array;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 use pcap_parser::{Block, PcapBlockOwned, PcapError, create_reader};
 
@@ -54,6 +58,7 @@ impl FlowTimeouts {
 }
 
 struct Packet {
+    packet_number: i64,
     timestamp: i64, // epoch microseconds
     src_ip: String,
     dest_ip: String,
@@ -66,6 +71,8 @@ struct Packet {
 type FlowKey = (String, String, u16, u16, u8);
 
 struct FlowState {
+    first_packet: i64,
+    last_packet: i64,
     first_timestamp: i64,
     last_timestamp: i64,
     fwd_bytes: i64,
@@ -87,6 +94,10 @@ pub fn pcap_to_parquet(input: &str, output: &str, timeouts: FlowTimeouts) -> Res
     let mut reader = create_reader(1 << 20, file)?;
     let mut linktype: u16 = LINKTYPE_ETHERNET;
     let mut legacy_nanos = false;
+    // Matches the packet numbering contract used by the passive Modbus
+    // decoder: every packet block is counted, even when its payload is not a
+    // supported IP packet.
+    let mut packet_number = 0_i64;
 
     loop {
         match reader.next() {
@@ -97,13 +108,16 @@ pub fn pcap_to_parquet(input: &str, output: &str, timeouts: FlowTimeouts) -> Res
                         legacy_nanos = hdr.magic_number == 0xa1b2_3c4d;
                     }
                     PcapBlockOwned::Legacy(b) => {
+                        packet_number += 1;
                         let frac_usec = if legacy_nanos {
                             (b.ts_usec / 1000) as i64
                         } else {
                             b.ts_usec as i64
                         };
                         let ts = b.ts_sec as i64 * 1_000_000 + frac_usec;
-                        if let Some(p) = parse_packet(b.data, linktype, ts, b.origlen as i64) {
+                        if let Some(p) =
+                            parse_packet(b.data, linktype, ts, b.origlen as i64, packet_number)
+                        {
                             ingest_packet(p, &mut active, &mut flows, timeouts);
                         }
                     }
@@ -111,10 +125,13 @@ pub fn pcap_to_parquet(input: &str, output: &str, timeouts: FlowTimeouts) -> Res
                         linktype = idb.linktype.0 as u16;
                     }
                     PcapBlockOwned::NG(Block::EnhancedPacket(epb)) => {
+                        packet_number += 1;
                         // Default if_tsresol (1e-6); per-interface overrides
                         // are out of spike scope.
                         let ts = ((epb.ts_high as i64) << 32) | epb.ts_low as i64;
-                        if let Some(p) = parse_packet(epb.data, linktype, ts, epb.origlen as i64) {
+                        if let Some(p) =
+                            parse_packet(epb.data, linktype, ts, epb.origlen as i64, packet_number)
+                        {
                             ingest_packet(p, &mut active, &mut flows, timeouts);
                         }
                     }
@@ -142,10 +159,36 @@ pub fn pcap_to_parquet(input: &str, output: &str, timeouts: FlowTimeouts) -> Res
     // HashMap drain order is nondeterministic; sort for stable output.
     flows.sort_by_key(|f| (f.state.first_timestamp, f.key.clone()));
 
-    let canonical: Vec<CanonicalFlow> = flows.iter().map(flow_to_canonical).collect();
-    let batch = flows_to_batch(&canonical)?;
+    let batch = flows_to_pcap_batch(&flows)?;
     write_parquet(&batch, output)?;
     Ok(batch.num_rows())
+}
+
+/// Extend the canonical flow columns with capture-local packet bounds.  These
+/// two columns are deliberately PCAP-specific: generic NetFlow/OCSF readers do
+/// not have packet ordinals, while protocol decoders can use them to make an
+/// exact transaction -> flow association.
+fn flows_to_pcap_batch(
+    flows: &[FlowRecord],
+) -> std::result::Result<RecordBatch, arrow::error::ArrowError> {
+    let canonical: Vec<CanonicalFlow> = flows.iter().map(flow_to_canonical).collect();
+    let canonical_batch = flows_to_batch(&canonical)?;
+    let mut fields = canonical_batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.push(Field::new("first_packet", DataType::Int64, false));
+    fields.push(Field::new("last_packet", DataType::Int64, false));
+    let mut columns = canonical_batch.columns().to_vec();
+    columns.push(Arc::new(Int64Array::from_iter_values(
+        flows.iter().map(|flow| flow.state.first_packet),
+    )));
+    columns.push(Arc::new(Int64Array::from_iter_values(
+        flows.iter().map(|flow| flow.state.last_packet),
+    )));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
 }
 
 fn flow_to_canonical(flow: &FlowRecord) -> CanonicalFlow {
@@ -165,7 +208,13 @@ fn flow_to_canonical(flow: &FlowRecord) -> CanonicalFlow {
     }
 }
 
-fn parse_packet(data: &[u8], linktype: u16, timestamp: i64, origlen: i64) -> Option<Packet> {
+fn parse_packet(
+    data: &[u8],
+    linktype: u16,
+    timestamp: i64,
+    origlen: i64,
+    packet_number: i64,
+) -> Option<Packet> {
     let sliced = if linktype == LINKTYPE_ETHERNET {
         SlicedPacket::from_ethernet(data).ok()?
     } else {
@@ -203,6 +252,7 @@ fn parse_packet(data: &[u8], linktype: u16, timestamp: i64, origlen: i64) -> Opt
     };
 
     Some(Packet {
+        packet_number,
         timestamp,
         src_ip,
         dest_ip,
@@ -255,6 +305,8 @@ fn ingest_packet(
     }
 
     let state = active.entry(key.clone()).or_insert(FlowState {
+        first_packet: packet.packet_number,
+        last_packet: packet.packet_number,
         first_timestamp: ts,
         last_timestamp: ts,
         fwd_bytes: 0,
@@ -265,6 +317,7 @@ fn ingest_packet(
 
     // max(): captures can carry slightly out-of-order packets
     state.last_timestamp = state.last_timestamp.max(ts);
+    state.last_packet = state.last_packet.max(packet.packet_number);
 
     let is_forward = (packet.src_ip.as_str(), packet.src_port) == (key.0.as_str(), key.2);
     if is_forward {
@@ -282,6 +335,7 @@ mod tests {
 
     fn pkt(ts_usec: i64) -> Packet {
         Packet {
+            packet_number: (ts_usec / 1_000_000) + 1,
             timestamp: ts_usec,
             src_ip: "10.0.0.1".into(),
             dest_ip: "10.0.0.2".into(),
@@ -342,6 +396,8 @@ mod tests {
         assert_eq!(split.len(), 2);
         assert_eq!(split[0].state.fwd_pkts, 1);
         assert_eq!(split[1].state.fwd_pkts, 1);
+        assert_eq!(split[0].state.first_packet, split[0].state.last_packet);
+        assert_eq!(split[1].state.first_packet, split[1].state.last_packet);
     }
 
     #[test]
@@ -361,5 +417,6 @@ mod tests {
         assert_eq!(split.len(), 2);
         assert_eq!(split[0].state.fwd_pkts, 6);
         assert_eq!(split[1].state.fwd_pkts, 1);
+        assert!(split[0].state.last_packet < split[1].state.first_packet);
     }
 }
