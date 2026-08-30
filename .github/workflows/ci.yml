@@ -18,6 +18,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv-check:
+    name: Rust 1.85 compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install declared MSRV
+        uses: dtolnay/rust-toolchain@1.85
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check declared MSRV
+        run: cargo check --locked
+
   build-test-package:
     name: Build, Test, Package
     runs-on: ubuntu-latest
