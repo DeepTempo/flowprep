@@ -73,6 +73,8 @@ Five subcommands:
 #    Defaults: --active-timeout 60 --inactive-timeout 15 (integer seconds)
 flowprep pcap capture.pcap flows.parquet
 flowprep pcap capture.pcap flows.parquet --active-timeout 60 --inactive-timeout 15
+#    src = the endpoint that opened each flow (default: the lower-sorting endpoint)
+flowprep pcap capture.pcap flows.parquet --initiator-order
 
 # 2. Any aliased flow table (CSV, parquet, Zeek TSV log, Argus .binetflow)
 #    -> the canonical schema
@@ -168,6 +170,17 @@ integer seconds on `flowprep pcap` (`--active-timeout`,
 `--inactive-timeout`; both must be `> 0` and inactive `<=` active). The
 reader streams pcap and pcapng, keeps constant memory on the packet path,
 and is robust to the slightly-out-of-order packets real captures contain.
+
+By default a pcap flow's `src` is the endpoint that sorts first, so `src →
+dst` is not a direction. With `--initiator-order`, `src` is the endpoint that
+opened the flow and `fwd_*` counts initiator → responder: the sender of a SYN
+without ACK; else the receiver of a SYN-ACK (the SYN was missed); else the
+sender of the first packet seen. A stronger signal later in the flow replaces
+a weaker one, and a record split by the active timeout keeps the initiator of
+the record it continues. The first-packet guess is often wrong for flows
+already open when the capture started. ICMP request and reply stay separate
+one-way flows, each with its sender in `src`. Flows between two ports of one
+address keep the default order.
 
 ### Zeek logs and research exports
 

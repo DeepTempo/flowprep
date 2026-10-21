@@ -30,6 +30,11 @@ enum Command {
         /// Idle gap after the last packet before a flow record is closed (seconds).
         #[arg(long, default_value_t = pcap::DEFAULT_INACTIVE_TIMEOUT_SECS)]
         inactive_timeout: u64,
+        /// Put the endpoint that opened each flow in src (SYN sender, else
+        /// SYN-ACK receiver, else first packet's sender); fwd = src -> dst.
+        /// Default: src is the lower-sorting endpoint.
+        #[arg(long)]
+        initiator_order: bool,
     },
     /// aliased parquet/CSV flow table -> canonical parquet
     Canonicalize { input: String, output: String },
@@ -64,8 +69,9 @@ fn main() {
             output,
             active_timeout,
             inactive_timeout,
+            initiator_order,
         } => match pcap::FlowTimeouts::from_secs(*active_timeout, *inactive_timeout) {
-            Ok(timeouts) => pcap::pcap_to_parquet(input, output, timeouts)
+            Ok(timeouts) => pcap::pcap_to_parquet(input, output, timeouts, *initiator_order)
                 .map(|n| println!("Wrote {n} flows to {output}")),
             Err(e) => Err(e),
         },

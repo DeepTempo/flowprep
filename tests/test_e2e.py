@@ -62,6 +62,28 @@ def build_test_pcap(path):
         )
 
 
+def build_initiator_pcap(path):
+    """A TCP handshake whose client (10.0.0.9) sorts after its server
+    (10.0.0.10, as strings), so sorted order puts the server in src."""
+    with open(path, "wb") as f:
+        writer = dpkt.pcap.Writer(f)
+        client, server = ("10.0.0.9", 51000), ("10.0.0.10", 443)
+        for i, (src, dst, flags, size) in enumerate([
+            (client, server, dpkt.tcp.TH_SYN, 0),
+            (server, client, dpkt.tcp.TH_SYN | dpkt.tcp.TH_ACK, 0),
+            (client, server, dpkt.tcp.TH_ACK, 100),
+            (server, client, dpkt.tcp.TH_ACK, 900),
+        ]):
+            tcp = dpkt.tcp.TCP(sport=src[1], dport=dst[1], flags=flags)
+            tcp.data = b"x" * size
+            ip = dpkt.ip.IP(src=bytes(map(int, src[0].split("."))), dst=bytes(map(int, dst[0].split("."))), p=6)
+            ip.data = tcp
+            ip.len = len(bytes(ip))
+            eth = dpkt.ethernet.Ethernet(type=dpkt.ethernet.ETH_TYPE_IP)
+            eth.data = ip
+            writer.writepkt(bytes(eth), ts=1750000000.0 + i)
+
+
 def build_generic_flow_csv(path):
     """Generic aliased flow CSV: leading spaces in header names, an explicitly
     ms-named duration, and epoch-seconds timestamps. Not a real vendor format —
@@ -244,6 +266,20 @@ def main():
     tcp = [r for r in t.to_pylist() if r["protocol"] == 6][0]
     assert tcp["fwd_pkts"] == 3 and tcp["bwd_pkts"] == 2, "direction split wrong"
     assert tcp["flow_dur"] == 2.0, f"flow_dur wrong: {tcp['flow_dur']}"
+
+    # --initiator-order: src is the endpoint that sent the SYN.
+    build_initiator_pcap("/tmp/flowprep_initiator.pcap")
+    for args, src, fwd in (([], "10.0.0.10", 2), (["--initiator-order"], "10.0.0.9", 2)):
+        r = subprocess.run(
+            [FLOWPREP_BIN, "pcap", *args, "/tmp/flowprep_initiator.pcap", "/tmp/flowprep_initiator.parquet"],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, f"pcap {args} failed: {r.stderr.strip()}"
+        (row,) = pq.read_table("/tmp/flowprep_initiator.parquet").to_pylist()
+        assert row["src_ip"] == src, f"{args}: src {row['src_ip']}, expected {src}"
+        assert row["fwd_pkts"] == fwd and row["bwd_pkts"] == 2, f"{args}: direction split wrong"
+        client_bytes = row["fwd_bytes"] if src == "10.0.0.9" else row["bwd_bytes"]
+        assert client_bytes < 1000 < row["fwd_bytes"] + row["bwd_bytes"] - client_bytes, f"{args}: bytes not with packets"
 
     r = subprocess.run(
         [FLOWPREP_BIN, "canonicalize", "/tmp/flowprep_test.csv", "/tmp/flowprep_csv.parquet"],
